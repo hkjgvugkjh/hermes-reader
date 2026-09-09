@@ -76,7 +76,7 @@ class GlobalConfigProvider extends ChangeNotifier {
         authToken: _config.proxyAuthToken,
       );
 
-      final servers = await client.fetchServers();
+      final servers = await client.fetchServersDI();
       _proxyServers = servers;
       _isFetchingServers = false;
       notifyListeners();
@@ -102,7 +102,7 @@ class GlobalConfigProvider extends ChangeNotifier {
         authToken: _config.proxyAuthToken,
       );
 
-      await client.fetchServers();
+      await client.fetchServersDI();
       return true;
     } catch (e) {
       _error = 'Proxy connection failed: $e';

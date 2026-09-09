@@ -50,6 +50,7 @@ class LibraryProvider extends ChangeNotifier {
         serverId: serverId,
         serverName: serverName,
       );
+      print('[SHELF] got ${books.length} books for $serverId');
       _books
         ..clear()
         ..addAll(books);
@@ -62,7 +63,9 @@ class LibraryProvider extends ChangeNotifier {
           _cached.add(book.id);
         }
       }
-    } catch (e) {
+    } catch (e, st) {
+      print('[SHELF] listBooks failed: $e');
+      print('[SHELF] $st');
       _error = e is LibrarySandboxError ? e.message : e.toString();
       _books.clear();
     } finally {

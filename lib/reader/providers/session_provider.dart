@@ -1,18 +1,19 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../services/session_monitor_service.dart';
+import '../services/proxy_client.dart' as reader_proxy;
 
 /// Owns the [SessionMonitorService] and exposes its state to the UI.
-///
-/// Wire this provider into MultiProvider, then call [init] after ServerProvider
-/// is ready so it can discover which servers to watch.
+/// Also listens to DI session updates from the proxy client.
 class SessionProvider extends ChangeNotifier {
   SessionMonitorService? _monitor;
   SessionMonitorService get monitor => _monitor!;
 
   StreamSubscription<SessionChange>? _changeSub;
+  StreamSubscription<Map<String, dynamic>>? _diSub;
   final List<SessionChange> _recentChanges = [];
   bool _initialized = false;
+  reader_proxy.ProxyClient? _proxyClient;
 
   List<SessionChange> get recentChanges => List.unmodifiable(_recentChanges);
   bool get isInitialized => _initialized;
@@ -21,6 +22,9 @@ class SessionProvider extends ChangeNotifier {
   /// Maximum changes to retain for the UI list.
   int maxHistory = 50;
 
+  /// The proxy client for DI protocol communication.
+  reader_proxy.ProxyClient? get proxyClient => _proxyClient;
+
   /// Initialize with optional pre-built monitor (e.g., from tests).
   void init({SessionMonitorService? monitor}) {
     if (_initialized) return;
@@ -28,6 +32,32 @@ class SessionProvider extends ChangeNotifier {
     _changeSub = _monitor!.changes.listen(_onChange);
     _initialized = true;
     notifyListeners();
+  }
+
+  /// Set the proxy client to receive DI session updates.
+  void setProxyClient(reader_proxy.ProxyClient client) {
+    _proxyClient = client;
+    _diSub = client.sessionUpdates.listen(_onDIUpdate);
+    // Also pass to monitor service for DI polling
+    _monitor?.setProxyClient(client);
+    notifyListeners();
+  }
+
+  void _onDIUpdate(Map<String, dynamic> update) {
+    final serverId = update['server_id'] as String? ?? '';
+    final full = update['full'] as bool? ?? false;
+    final sessions = update['sessions'] as List? ?? [];
+
+    for (final s in sessions) {
+      final map = s as Map<String, dynamic>;
+      final snap = SessionSnapshot.fromJson(map);
+      final change = SessionChange(
+        kind: SessionChangeKind.sessionResumed,
+        after: snap,
+        serverId: serverId,
+      );
+      _onChange(change);
+    }
   }
 
   void _onChange(SessionChange change) {
@@ -42,6 +72,10 @@ class SessionProvider extends ChangeNotifier {
   Future<void> addServer(MonitorTarget target) async {
     _ensureInit();
     _monitor!.addTarget(target);
+    // Connect to the server via DI protocol first, then start monitoring
+    if (_proxyClient != null && _proxyClient!.isConnected) {
+      await _proxyClient!.connectServer(target.serverId);
+    }
     if (!_monitor!.isRunning) {
       await _monitor!.start();
     }
@@ -88,6 +122,7 @@ class SessionProvider extends ChangeNotifier {
   @override
   void dispose() {
     _changeSub?.cancel();
+    _diSub?.cancel();
     _monitor?.dispose();
     super.dispose();
   }

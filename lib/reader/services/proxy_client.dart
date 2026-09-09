@@ -20,8 +20,13 @@ class ProxyClient {
   String? _clientId;
 
   final _responseCallbacks = <String, Completer<Map<String, dynamic>>>{};
+  final _listResponseCompleter = Completer<List<Map<String, dynamic>>>();
+  final _connectCompleters = <String, Completer<void>>{};
+  final _sessionUpdateController = StreamController<Map<String, dynamic>>.broadcast();
   int _requestId = 0;
   StreamSubscription? _subscription;
+
+  Stream<Map<String, dynamic>> get sessionUpdates => _sessionUpdateController.stream;
 
   bool get isConnected => _connected;
   String? get clientId => _clientId;
@@ -39,21 +44,27 @@ class ProxyClient {
     return '${uri.scheme == 'wss' ? 'https' : 'http'}://${uri.host}:${uri.port}';
   }
 
-  /// Fetch server list from proxy admin API
-  Future<List<Map<String, dynamic>>> fetchServers() async {
+  /// Fetch server list via DI protocol (TypeDIList)
+  Future<List<Map<String, dynamic>>> fetchServersDI() async {
+    if (!_connected || _channel == null) {
+      throw StateError('Not connected');
+    }
+
+    // Build DIList request (empty payload)
+    final encrypted = await _encrypt('');
+    final lengthBytes = Uint8List(4);
+    final lengthData = ByteData.view(lengthBytes.buffer);
+    lengthData.setUint32(0, encrypted.length, Endian.big);
+
+    final encryptedFrame = BytesBuilder();
+    encryptedFrame.addByte(0x32); // TypeDIList
+    encryptedFrame.add(lengthBytes);
+    encryptedFrame.add(encrypted);
+    _channel!.sink.add(encryptedFrame.toBytes());
+
     try {
-      final response = await http.get(
-        Uri.parse('$adminUrl/api/config'),
-        headers: authToken != null ? {'Authorization': 'Bearer $authToken'} : {},
-      ).timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final servers = (data['servers'] as List? ?? [])
-            .map((s) => s as Map<String, dynamic>)
-            .toList();
-        return servers;
-      }
-      return [];
+      final result = await _listResponseCompleter.future.timeout(const Duration(seconds: 10));
+      return result;
     } catch (e) {
       return [];
     }
@@ -63,9 +74,19 @@ class ProxyClient {
   Future<void> connect() async {
     if (_connected) return;
 
+    // Cancel any existing subscription to prevent "Stream already listened" error
+    if (_subscription != null) {
+      await _subscription!.cancel();
+      _subscription = null;
+    }
+
     try {
+      // Build URL with token for Nginx auth
       final uri = Uri.parse(proxyUrl);
-      _channel = WebSocketChannel.connect(uri);
+      final tokenQuery = (authToken?.isNotEmpty == true) ? '?token=$authToken' : '';
+      final url = '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}${uri.path}$tokenQuery';
+      final parsedUri = Uri.parse(url);
+      _channel = WebSocketChannel.connect(parsedUri);
 
       // Generate X25519 key pair
       final x25519 = cryptography.X25519();
@@ -79,39 +100,163 @@ class ProxyClient {
       };
       _channel!.sink.add(jsonEncode(handshake));
 
-      // Wait for server handshake response
-      final response = await _channel!.stream.first.timeout(timeout);
-      final serverHandshake = jsonDecode(response as String);
-      final serverPublicKeyBytes = base64Decode(serverHandshake['public_key'] as String);
-
-      // Compute shared secret using X25519 ECDH
-      final serverPublicKey = cryptography.SimplePublicKey(
-        serverPublicKeyBytes,
-        type: cryptography.KeyPairType.x25519,
-      );
-      final sharedSecret = await x25519.sharedSecretKey(
-        keyPair: keyPair,
-        remotePublicKey: serverPublicKey,
-      );
-      _sharedKey = await sharedSecret.extractBytes();
-
-      _clientId = 'hive-${base64Encode(publicKey.bytes).substring(0, 8)}';
-      _connected = true;
-
-      // Listen for incoming messages
+      // Single subscription for all messages (handshake + data)
+      final handshakeCompleter = Completer<void>();
+      
       _subscription = _channel!.stream.listen(
-        _onMessage,
+        (data) {
+          // Handle handshake response first (before _connected is true)
+          if (!_connected && data is String) {
+            try {
+              final serverHandshake = jsonDecode(data);
+              final serverPublicKeyBytes = base64Decode(serverHandshake['public_key'] as String);
+              
+              // Compute shared secret using X25519 ECDH
+              final serverPublicKey = cryptography.SimplePublicKey(
+                serverPublicKeyBytes,
+                type: cryptography.KeyPairType.x25519,
+              );
+              x25519.sharedSecretKey(
+                keyPair: keyPair,
+                remotePublicKey: serverPublicKey,
+              ).then((sharedSecret) async {
+                _sharedKey = await sharedSecret.extractBytes();
+                // Derive key using SHA-256 (same as Go server)
+                final keyHash = await cryptography.Sha256().hash(_sharedKey!);
+                _sharedKey = keyHash.bytes;
+                
+                _clientId = 'hive-${base64Encode(publicKey.bytes).substring(0, 8)}';
+                _connected = true;
+                
+                // Complete _connectedCompleter BEFORE handshakeCompleter
+                // so that when connect() returns, the client is fully ready
+                if (!_connectedCompleter.isCompleted) {
+                  _connectedCompleter.complete();
+                }
+                
+                if (!handshakeCompleter.isCompleted) {
+                  handshakeCompleter.complete();
+                }
+              }).catchError((e) {
+                if (!handshakeCompleter.isCompleted) {
+                  handshakeCompleter.completeError(KeyExchangeException('Key exchange failed: $e'));
+                }
+              });
+            } catch (e) {
+              if (!handshakeCompleter.isCompleted) {
+                handshakeCompleter.completeError(KeyExchangeException('Invalid handshake response: $e'));
+              }
+            }
+          } else {
+            // Already connected, process as normal message
+            _onMessage(data);
+          }
+        },
         onError: (e) {
           _connected = false;
+          if (!handshakeCompleter.isCompleted) {
+            handshakeCompleter.completeError(e);
+          }
         },
         onDone: () {
           _connected = false;
+          if (!handshakeCompleter.isCompleted) {
+            handshakeCompleter.completeError(ConnectionClosedException('Connection closed during handshake'));
+          }
         },
       );
+
+      // Wait for handshake to complete
+      await handshakeCompleter.future.timeout(timeout);
     } catch (e) {
       _connected = false;
       throw Exception('WebSocket connection failed: $e');
     }
+  }
+
+  final _connectedCompleter = Completer<void>();
+  Future<void> get whenConnected => _connectedCompleter.future;
+  final _sessionUpdateCompleters = <String, Completer<Map<String, dynamic>>>{};
+
+  /// Completer that fires when proxy client is set
+  Completer<void>? _proxyClientSetCompleter;
+  Future<void> pollSessions(String serverId) async {
+    if (!_connected || _channel == null) {
+      throw StateError('Not connected');
+    }
+
+    final payload = jsonEncode({'server_id': serverId});
+    final encrypted = await _encrypt(payload);
+
+    final frame = BytesBuilder();
+    frame.addByte(0x34); // TypeDISessionPoll
+    final lengthBytes = Uint8List(4);
+    final lengthData = ByteData.view(lengthBytes.buffer);
+    lengthData.setUint32(0, encrypted.length, Endian.big);
+    frame.add(lengthBytes);
+    frame.add(encrypted);
+    _channel!.sink.add(frame.toBytes());
+    print('[DI] Sent TypeDISessionPoll(0x34) server_id=$serverId');
+  }
+
+  /// Request sessions for a server and wait for the response.
+  /// This attaches the listener BEFORE sending the poll to avoid race conditions.
+  Future<Map<String, dynamic>> requestSessions(String serverId, {Duration timeout = const Duration(seconds: 15)}) async {
+    if (!_connected || _channel == null) {
+      throw StateError('Not connected');
+    }
+
+    // Create completer and register it BEFORE sending the poll
+    final completer = Completer<Map<String, dynamic>>();
+    _sessionUpdateCompleters[serverId] = completer;
+    print('[DI] Registered completer for server_id=$serverId');
+
+    // Now send the poll request
+    try {
+      await pollSessions(serverId);
+      print('[DI] Sent poll for server_id=$serverId, waiting for response...');
+    } catch (e) {
+      _sessionUpdateCompleters.remove(serverId);
+      rethrow;
+    }
+
+    // Wait for the response
+    try {
+      final result = await completer.future.timeout(timeout);
+      print('[DI] Got response for server_id=$serverId, ${result['sessions']?.length ?? 0} sessions');
+      return result;
+    } catch (e) {
+      print('[DI] Timeout/error for server_id=$serverId: $e');
+      _sessionUpdateCompleters.remove(serverId);
+      rethrow;
+    }
+  }
+
+  /// Connect to a specific server via DI protocol (TypeDIConnect=0x30)
+  Future<void> connectServer(String serverId) async {
+    if (!_connected || _channel == null) {
+      throw StateError('Not connected');
+    }
+
+    final completer = Completer<void>();
+    _connectCompleters[serverId] = completer;
+
+    final payload = jsonEncode({'server_id': serverId});
+    final encrypted = await _encrypt(payload);
+
+    final frame = BytesBuilder();
+    frame.addByte(0x30); // TypeDIConnect
+    final lengthBytes = Uint8List(4);
+    final lengthData = ByteData.view(lengthBytes.buffer);
+    lengthData.setUint32(0, encrypted.length, Endian.big);
+    frame.add(lengthBytes);
+    frame.add(encrypted);
+    _channel!.sink.add(frame.toBytes());
+    print('[DI] Sent TypeDIConnect(0x30) server_id=$serverId');
+
+    // Wait for TypeDIConnectAck
+    await completer.future.timeout(timeout);
+    print('[DI] Got TypeDIConnectAck server_id=$serverId');
   }
 
   /// Send an HTTP request through the proxy.
@@ -182,6 +327,7 @@ class ProxyClient {
     _decrypt(encrypted).then((decrypted) {
       try {
         final response = jsonDecode(decrypted);
+        print('[DI] Received type=0x${type.toRadixString(16).padLeft(2, '0')} server=${response['server_id'] ?? '?'}');
 
         if (type == 0x11) {
           // HTTP Response
@@ -198,6 +344,30 @@ class ProxyClient {
               Exception(response['message'] ?? 'Unknown error'),
             );
             _responseCallbacks.remove(requestId);
+          }
+        } else if (type == 0x33) {
+          // TypeDIListResp
+          final servers = response['servers'] as List? ?? [];
+          final serverList = servers.map((s) => s as Map<String, dynamic>).toList();
+          if (!_listResponseCompleter.isCompleted) {
+            _listResponseCompleter.complete(serverList);
+          }
+        } else if (type == 0x31) {
+          // TypeDIConnectAck - server accepted connection
+          final serverId = response['server_id'] as String?;
+          if (serverId != null && _connectCompleters.containsKey(serverId)) {
+            _connectCompleters[serverId]!.complete();
+            _connectCompleters.remove(serverId);
+          }
+        } else if (type == 0x35) {
+          // TypeDISessionUpdate
+          final serverId = response['server_id'] as String?;
+          if (serverId != null && _sessionUpdateCompleters.containsKey(serverId)) {
+            _sessionUpdateCompleters[serverId]!.complete(response);
+            _sessionUpdateCompleters.remove(serverId);
+          }
+          if (!_sessionUpdateController.isClosed) {
+            _sessionUpdateController.add(response);
           }
         }
       } catch (e) {
@@ -250,4 +420,20 @@ class ProxyClient {
 
     return utf8.decode(decrypted);
   }
+}
+
+/// Exception thrown when X25519 key exchange fails.
+class KeyExchangeException implements Exception {
+  final String message;
+  KeyExchangeException(this.message);
+  @override
+  String toString() => 'KeyExchangeException: $message';
+}
+
+/// Exception thrown when connection closes unexpectedly.
+class ConnectionClosedException implements Exception {
+  final String message;
+  ConnectionClosedException(this.message);
+  @override
+  String toString() => 'ConnectionClosedException: $message';
 }

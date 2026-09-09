@@ -64,6 +64,7 @@ class LibraryService {
     final response = await transport.get(
       '/api/hermes/files/list?path=${Uri.encodeComponent(dir)}',
     );
+    print('[SHELF] GET dir=$dir status=${response.statusCode} bodyLen=${response.body?.length ?? 0}');
 
     if (!response.isOk) {
       throw LibrarySandboxError(

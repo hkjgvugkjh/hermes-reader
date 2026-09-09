@@ -61,14 +61,19 @@ class GlobalConfig {
         proxyAdminPort: proxyAdminPort ?? this.proxyAdminPort,
       );
 
-  /// Build WebSocket URL for hermes-proxy
+  /// Build WebSocket URL with token for Nginx auth
+  /// Derives from proxyUrl: https://host → wss://host/ws?token=xxx (default 443, no port needed)
+  /// Only include port when explicitly specified and non-standard (e.g. :8443)
   String get proxyWsUrl {
     if (mode != ConnectionMode.hermesProxy) return '';
     final uri = Uri.parse(proxyUrl);
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final host = uri.host;
-    final port = proxyWsPort;
-    return '$scheme://$host:$port/ws';
+    final port = uri.port;
+    final defaultPort = scheme == 'wss' ? 443 : 80;
+    final portPart = (port > 0 && port != defaultPort) ? ':$port' : '';
+    final tokenPart = proxyAuthToken.isNotEmpty ? '?token=$proxyAuthToken' : '';
+    return '$scheme://$host$portPart/ws$tokenPart';
   }
 
   /// Get admin HTTP URL from proxy URL

@@ -32,12 +32,16 @@ class ProxyFileTransport implements FileTransport {
       await proxyClient.connect();
     }
 
+    print('[TRANS] GET server=$serverId path=$path');
     final result = await proxyClient.sendRequest(
       serverId: serverId,
       method: 'GET',
       path: path,
       headers: headers,
-    );
+    ).timeout(const Duration(seconds: 15), onTimeout: () {
+      throw Exception('proxy request timed out after 15s');
+    });
+    print('[TRANS] resp status=${result['status_code']}');
 
     final status = result['status_code'] as int? ?? 0;
 

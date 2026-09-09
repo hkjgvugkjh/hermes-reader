@@ -62,6 +62,18 @@ class ServerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Update a server's online flag (in-memory only, not persisted).
+  void setServerOnline(String id, bool online) {
+    final index = _servers.indexWhere((s) => s.id == id);
+    if (index < 0) return;
+    if (_servers[index].isOnline == online) return;
+    _servers[index] = _servers[index].copyWith(isOnline: online);
+    if (_activeServer?.id == id) {
+      _activeServer = _servers[index];
+    }
+    notifyListeners();
+  }
+
   /// Clear all servers
   void clearServers() {
     _servers.clear();

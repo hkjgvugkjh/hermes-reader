@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../services/proxy_client.dart' as reader_proxy;
 
 /// Snapshot of one Hermes session's state at a point in time.
 class SessionSnapshot {
@@ -21,22 +22,75 @@ class SessionSnapshot {
   });
 
   factory SessionSnapshot.fromJson(Map<String, dynamic> json) {
-    final rawUpdated = json['updated_at'] ?? json['updatedAt'] ?? json['last_activity'];
     return SessionSnapshot(
       id: json['id']?.toString() ?? '',
       title: json['title']?.toString() ?? json['name']?.toString() ?? 'untitled',
       state: _inferState(json),
-      lastActivity: rawUpdated != null
-          ? DateTime.tryParse(rawUpdated.toString()) ?? DateTime.now()
-          : DateTime.now(),
+      lastActivity: _parseTime(json),
       raw: json,
     );
   }
 
+  /// Accepts ISO8601 strings or unix epoch (seconds or milliseconds).
+  static DateTime _parseTime(Map<String, dynamic> json) {
+    final raw = json['updated_at'] ??
+        json['updatedAt'] ??
+        json['last_activity'] ??
+        json['lastActive'] ??
+        json['last_active'];
+    if (raw == null) return DateTime.now();
+    if (raw is num) {
+      final v = raw.toInt();
+      // Heuristic: values above 1e12 are milliseconds.
+      return DateTime.fromMillisecondsSinceEpoch(
+        v > 1000000000000 ? v : v * 1000,
+      );
+    }
+    final s = raw.toString();
+    final asNum = int.tryParse(s);
+    if (asNum != null) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        asNum > 1000000000000 ? asNum : asNum * 1000,
+      );
+    }
+    return DateTime.tryParse(s) ?? DateTime.now();
+  }
+
+  /// Seconds of inactivity after which a session is considered stopped.
+  static const int activityTtlSeconds = 180;
+
   static SessionState _inferState(Map<String, dynamic> json) {
-    if (json['status'] == 'error' || json['error'] == true) return SessionState.error;
-    if (json['pending'] == true || json['needs_input'] == true) return SessionState.pending;
-    if (json['completed'] == true || json['status'] == 'completed') return SessionState.stopped;
+    final rawStatus = (json['status'] ?? json['state'])?.toString().toLowerCase();
+    if (rawStatus != null && rawStatus.isNotEmpty) {
+      switch (rawStatus) {
+        case 'error':
+        case 'failed':
+          return SessionState.error;
+        case 'pending':
+        case 'waiting':
+        case 'needs_input':
+          return SessionState.pending;
+        case 'completed':
+        case 'stopped':
+        case 'finished':
+        case 'done':
+          return SessionState.stopped;
+        case 'running':
+        case 'active':
+        case 'busy':
+          return SessionState.running;
+      }
+    }
+    if (json['error'] == true) return SessionState.error;
+    if (json['pending'] == true || json['needs_input'] == true) {
+      return SessionState.pending;
+    }
+    if (json['completed'] == true) return SessionState.stopped;
+
+    // Hermes DI only reports `last_active`; infer from recency.
+    final last = _parseTime(json);
+    final idle = DateTime.now().difference(last).inSeconds;
+    if (idle < 0 || idle > activityTtlSeconds) return SessionState.stopped;
     return SessionState.running;
   }
 }
@@ -105,6 +159,7 @@ class MonitorTarget {
 ///   await monitor.start();
 class SessionMonitorService {
   final http.Client _client;
+  reader_proxy.ProxyClient? _proxyClient;
 
   final List<MonitorTarget> _targets = [];
   final Map<String, List<SessionSnapshot>> _lastSnapshots = {};
@@ -119,8 +174,11 @@ class SessionMonitorService {
   bool _running = false;
   bool get isRunning => _running;
 
-  /// Build a service with an optional custom http client (for tests).
-  SessionMonitorService({http.Client? client}) : _client = client ?? http.Client();
+  /// Build a service with an optional custom http client (for tests)
+  /// and an optional proxy client (when connecting via hermes-proxy).
+  SessionMonitorService({http.Client? client, reader_proxy.ProxyClient? proxyClient})
+      : _client = client ?? http.Client(),
+        _proxyClient = proxyClient;
 
   /// Add a server to monitor. If already monitoring, updates its target.
   void addTarget(MonitorTarget target) {
@@ -152,6 +210,11 @@ class SessionMonitorService {
   /// Set (or clear) the auth token for a server (e.g., after login).
   void setToken(String serverId, String? token) {
     _serverTokens[serverId] = token;
+  }
+
+  /// Set the proxy client to use for polling (via DI protocol).
+  void setProxyClient(reader_proxy.ProxyClient client) {
+    _proxyClient = client;
   }
 
   /// Begin polling all targets.
@@ -193,33 +256,78 @@ class SessionMonitorService {
   Future<void> _pollOnce(MonitorTarget target) async {
     try {
       final token = _serverTokens[target.serverId] ?? target.authToken;
-      final fetched = await _fetchSessions(target.baseUrl, token);
-      if (fetched == null) {
-        _emitChange(SessionChange(
-          kind: SessionChangeKind.serverError,
-          serverId: target.serverId,
-        ));
-        return;
-      }
-      final snapshots = fetched.$1;
-      final authRequired = fetched.$2;
+      
+      // Use proxy client if available (DI protocol), otherwise direct HTTP
+      if (_proxyClient != null && _proxyClient!.isConnected) {
+        final fetched = await _fetchSessionsDI(target.serverId, token);
+        if (fetched == null) {
+          _emitChange(SessionChange(
+            kind: SessionChangeKind.serverError,
+            serverId: target.serverId,
+          ));
+          return;
+        }
+        final snapshots = fetched.$1;
+        final authRequired = fetched.$2;
 
-      if (authRequired) {
-        _emitChange(SessionChange(
-          kind: SessionChangeKind.authRequired,
-          serverId: target.serverId,
-        ));
-        return;
-      }
+        if (authRequired) {
+          _emitChange(SessionChange(
+            kind: SessionChangeKind.authRequired,
+            serverId: target.serverId,
+          ));
+          return;
+        }
 
-      final previous = _lastSnapshots[target.serverId] ?? [];
-      _lastSnapshots[target.serverId] = snapshots;
-      _detectChanges(target, previous, snapshots);
+        final previous = _lastSnapshots[target.serverId] ?? [];
+        _lastSnapshots[target.serverId] = snapshots;
+        _detectChanges(target, previous, snapshots);
+      } else {
+        // Direct HTTP (fallback)
+        final fetched = await _fetchSessions(target.baseUrl, token);
+        if (fetched == null) {
+          _emitChange(SessionChange(
+            kind: SessionChangeKind.serverError,
+            serverId: target.serverId,
+          ));
+          return;
+        }
+        final snapshots = fetched.$1;
+        final authRequired = fetched.$2;
+
+        if (authRequired) {
+          _emitChange(SessionChange(
+            kind: SessionChangeKind.authRequired,
+            serverId: target.serverId,
+          ));
+          return;
+        }
+
+        final previous = _lastSnapshots[target.serverId] ?? [];
+        _lastSnapshots[target.serverId] = snapshots;
+        _detectChanges(target, previous, snapshots);
+      }
     } catch (_) {
       _emitChange(SessionChange(
         kind: SessionChangeKind.serverError,
         serverId: target.serverId,
       ));
+    }
+  }
+
+  /// Fetch sessions via DI protocol (through proxy).
+  Future<(List<SessionSnapshot>, bool)?> _fetchSessionsDI(String serverId, String? token) async {
+    if (_proxyClient == null) return null;
+    
+    try {
+      final update = await _proxyClient!.requestSessions(serverId,
+          timeout: const Duration(seconds: 15));
+      final sessions = update['sessions'] as List? ?? [];
+      final snapshots = sessions
+          .map((e) => SessionSnapshot.fromJson(e as Map<String, dynamic>))
+          .toList();
+      return (snapshots, false);
+    } catch (e) {
+      return null;
     }
   }
 

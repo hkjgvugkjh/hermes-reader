@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hermes_shared/hermes_shared.dart';
 import 'reader/providers/library_provider.dart';
 import 'reader/providers/session_provider.dart';
@@ -92,7 +94,7 @@ class HermesReaderApp extends StatelessWidget {
   }
 }
 
-/// Startup screen that checks configuration and connection.
+/// Startup screen with itemized checklist
 class StartupScreen extends StatefulWidget {
   const StartupScreen({super.key});
 
@@ -101,93 +103,217 @@ class StartupScreen extends StatefulWidget {
 }
 
 class _StartupScreenState extends State<StartupScreen> {
-  bool _checking = true;
-  String? _error;
+  final List<_CheckItem> _checks = [];
+  bool _allPassed = true;
 
   @override
   void initState() {
     super.initState();
+    FlutterError.onError = (details) {
+      debugPrint('Flutter error: ${details.exception}');
+    };
     _checkConfig();
   }
 
   Future<void> _checkConfig() async {
-    final globalConfig = context.read<GlobalConfigProvider>();
-    await globalConfig.load();
-
-    if (!mounted) return;
-
-    if (globalConfig.config.proxyUrl.isEmpty) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.local)),
-      );
+    _addCheck('读取本地配置');
+    try {
+      final globalConfig = context.read<GlobalConfigProvider>();
+      await globalConfig.load();
+      _passCheck();
+    } catch (e) {
+      _failCheck(e.toString());
+      _navigateToLocal();
       return;
     }
 
-    // Has config -> try to connect
-    setState(() => _checking = true);
+    if (!mounted) return;
 
+    final globalConfig = context.read<GlobalConfigProvider>();
+    if (globalConfig.config.proxyUrl.isEmpty) {
+      _addCheck('检查代理配置', skip: true);
+      _navigateToLocal();
+      return;
+    }
+
+    // Test HTTP connectivity first
+    _addCheck('测试 HTTP 连通性');
+    try {
+      final httpScheme = globalConfig.config.proxyUrl.startsWith('https') ? 'https' : 'http';
+      final host = Uri.parse(globalConfig.config.proxyUrl).host;
+      final healthUrl = '$httpScheme://$host/health';
+      final resp = await http.get(Uri.parse(healthUrl)).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        _passCheck();
+      } else {
+        _failCheck('HTTP ${resp.statusCode}');
+      }
+    } catch (e) {
+      _failCheck(e.toString());
+      _navigateToLocal();
+      return;
+    }
+
+    if (!mounted) return;
+
+    // Connect WebSocket
+    _addCheck('连接 WebSocket');
+    List<dynamic> servers = [];
     try {
       final proxyClient = reader_proxy.ProxyClient(
         proxyUrl: globalConfig.config.proxyWsUrl,
         authToken: globalConfig.config.proxyAuthToken,
       );
       await proxyClient.connect();
-      
+      _passCheck();
+
       if (!mounted) return;
 
-      // Fetch servers from proxy
-      final servers = await proxyClient.fetchServers();
+      // Fetch servers
+      _addCheck('获取服务器列表');
+      try {
+        servers = await proxyClient.fetchServersDI();
+        _passCheck('${servers.length} 个服务器');
+      } catch (e) {
+        _failCheck('获取失败: $e');
+      }
+
       if (mounted) {
         final serverProvider = context.read<ServerProvider>();
         serverProvider.setServers(servers);
       }
 
       if (!mounted) return;
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.online)),
-      );
+      _navigateToOnline();
     } catch (e) {
-      // Silently handle connection errors - don't show error to user
-      debugPrint('Startup connection check failed: $e');
-      
-      if (!mounted) return;
-      
-      // Silently fall back to local mode
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.local)),
-      );
+      _failCheck(e.toString());
+      _navigateToLocal();
     }
+  }
+
+  void _addCheck(String label, {bool skip = false}) {
+    if (!mounted) return;
+    setState(() {
+      _checks.add(_CheckItem(label: label, skipped: skip));
+    });
+  }
+
+  void _passCheck([String? detail]) {
+    if (!mounted) return;
+    setState(() {
+      _checks.last.pass(detail);
+    });
+  }
+
+  void _failCheck(String error) {
+    if (!mounted) return;
+    setState(() {
+      _allPassed = false;
+      _checks.last.fail(error);
+    });
+  }
+
+  void _navigateToLocal() {
+    if (!mounted) return;
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.local)),
+        );
+      }
+    });
+  }
+
+  void _navigateToOnline() {
+    if (!mounted) return;
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.online)),
+        );
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            Text(
-              _checking ? '正在检测配置...' : '连接失败',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-                textAlign: TextAlign.center,
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(
+                value: _checks.isEmpty ? null : _checks.where((c) => c.done).length / _checks.length,
               ),
+              const SizedBox(height: 24),
+              Text(
+                _allPassed ? '正在启动...' : '启动完成（有警告）',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 16),
+              ..._checks.map((c) => _buildCheckItem(c)),
             ],
-          ],
+          ),
         ),
       ),
     );
+  }
+
+  Widget _buildCheckItem(_CheckItem item) {
+    IconData icon;
+    Color color;
+    if (item.skipped) {
+      icon = Icons.skip_next;
+      color = Colors.grey;
+    } else if (item.passed) {
+      icon = Icons.check_circle;
+      color = Colors.green;
+    } else {
+      icon = Icons.error;
+      color = Colors.red;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              item.label + (item.detail != null ? ': ${item.detail}' : ''),
+              style: TextStyle(color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CheckItem {
+  final String label;
+  final bool skipped;
+  bool done = false;
+  bool passed = false;
+  String? detail;
+
+  _CheckItem({required this.label, this.skipped = false});
+
+  void pass([String? info]) {
+    done = true;
+    passed = true;
+    detail = info;
+  }
+
+  void fail(String error) {
+    done = true;
+    passed = false;
+    detail = error;
   }
 }
 
@@ -205,14 +331,57 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   int _pageIndex = 0;
   AppMode _currentMode = AppMode.local;
+  final GlobalKey<_SessionMonitorTabState> _sessionTabKey = GlobalKey();
+  String _sessionLimit = '10';
 
   @override
   void initState() {
     super.initState();
     _currentMode = widget.mode;
+    _loadSettings();
   }
 
-  /// Scan QR code and connect
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _sessionLimit = prefs.getString('session_limit') ?? '10';
+      });
+    }
+    // Auto-connect if proxy config exists
+    _autoConnect();
+  }
+
+  Future<void> _autoConnect() async {
+    final globalConfig = context.read<GlobalConfigProvider>();
+    await globalConfig.load();
+    if (globalConfig.isProxyMode && globalConfig.config.proxyUrl.isNotEmpty) {
+      print('[AUTO] Found saved proxy config, auto-connecting...');
+      // Load servers from proxy
+      try {
+        final proxyClient = reader_proxy.ProxyClient(
+          proxyUrl: globalConfig.config.proxyWsUrl,
+          authToken: globalConfig.config.proxyAuthToken,
+        );
+        await proxyClient.connect();
+        final servers = await proxyClient.fetchServersDI();
+        print('[AUTO] Connected, got ${servers.length} servers');
+        await _onConnected(
+          'wss://${globalConfig.config.proxyWsUrl.split('://').last.split('/').first}',
+          globalConfig.config.proxyAuthToken,
+          servers,
+        );
+      } catch (e) {
+        print('[AUTO] Auto-connect failed: $e');
+      }
+    }
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('session_limit', _sessionLimit);
+  }
+
   Future<void> _scanQR() async {
     final raw = await Navigator.push<String>(
       context,
@@ -228,20 +397,18 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Show connection dialog
     _showConnectionDialog(config);
   }
 
-  /// Show connection dialog with progress
   void _showConnectionDialog(Map<String, String> config) {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => _ConnectionDialog(
         config: config,
-        onConnected: (proxyUrl, token, servers) {
-          Navigator.pop(ctx);
-          _onConnected(proxyUrl, token, servers);
+        onConnected: (proxyUrl, token, servers) async {
+          await _onConnected(proxyUrl, token, servers);
+          if (ctx.mounted) Navigator.pop(ctx);
         },
         onFailed: (error) {
           Navigator.pop(ctx);
@@ -256,34 +423,64 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Called when connection is successful
-  void _onConnected(String proxyUrl, String token, List<Map<String, dynamic>> servers) {
-    // Save config
-    final globalConfig = context.read<GlobalConfigProvider>();
-    globalConfig.updateConfig(GlobalConfig(
-      mode: ConnectionMode.hermesProxy,
-      proxyUrl: proxyUrl,
-      proxyAuthToken: token,
-    ));
+  Future<void> _onConnected(String proxyUrl, String token, List<dynamic> servers) async {
+      print('[ONCONNECTED] START proxyUrl=$proxyUrl servers=${servers.length}');
+      final globalConfig = context.read<GlobalConfigProvider>();
+    
+      // proxyUrl from dialog is the stripped ws_url (e.g. wss://host or wss://host:port)
+      // Convert back to https URL for storage in GlobalConfig
+      final wsUri = Uri.parse(proxyUrl);
+      final httpsScheme = 'https';
+      final host = wsUri.host;
+      final port = wsUri.port;
+      // Store https URL (without port if default 443)
+      String baseUrl;
+      if (port > 0 && port != 443) {
+        baseUrl = '$httpsScheme://$host:$port';
+      } else {
+        baseUrl = '$httpsScheme://$host';
+      }
+    
+      // Recompute wsUrl from the corrected proxyUrl
+      final config = GlobalConfig(
+        mode: ConnectionMode.hermesProxy,
+        proxyUrl: baseUrl,
+        proxyAuthToken: token,
+        proxyWsPort: port > 0 ? port : 8649,
+        proxyAdminPort: 8650,
+      );
+      final wsUrl = config.proxyWsUrl;
+    
+      globalConfig.updateConfig(config);
 
-    // Save servers
-    final serverProvider = context.read<ServerProvider>();
-    serverProvider.setServers(servers);
+      final serverProvider = context.read<ServerProvider>();
+      serverProvider.setServers(servers);
 
-    // Switch to online mode
-    setState(() {
-      _currentMode = AppMode.online;
-    });
+      // Create proxy client and wire DI session updates to SessionProvider
+      final proxyClient = reader_proxy.ProxyClient(
+        proxyUrl: wsUrl,
+        authToken: token,
+      );
+      final sessionProvider = context.read<SessionProvider>();
+      print('[ONCONNECTED] Setting proxy client...');
+      sessionProvider.setProxyClient(proxyClient);
+      print('[ONCONNECTED] Connecting proxy client...');
+      await proxyClient.connect();
+      print('[ONCONNECTED] Proxy client connected!');
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('已连接')),
-    );
-  }
+      setState(() {
+        _currentMode = AppMode.online;
+      });
 
-  /// Switch to a specific server
+      ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('已连接')),
+          );
+    }
+
   void _switchServer(String? serverId) {
-    if (serverId == null) {
-      // Switch to local mode
+    // Tell the session tab its cached view is stale for the new server.
+    _sessionTabKey.currentState?.onServerSwitched(serverId);
+    if (serverId == null || serverId == '__local__') {
       setState(() {
         _currentMode = AppMode.local;
       });
@@ -296,9 +493,11 @@ class _HomeScreenState extends State<HomeScreen> {
       orElse: () => serverProvider.servers.first,
     );
     serverProvider.setActiveServer(server);
+    setState(() {
+      _currentMode = AppMode.online;
+    });
   }
 
-  /// Disconnect and return to local mode
   void _disconnect() {
     final globalConfig = context.read<GlobalConfigProvider>();
     globalConfig.updateConfig(GlobalConfig(
@@ -333,6 +532,7 @@ class _HomeScreenState extends State<HomeScreen> {
               const Text('当前配置', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
               Text('代理地址: ${globalConfig.config.proxyUrl}'),
+              Text('WS 端口: ${globalConfig.config.proxyWsPort}'),
               Text('Token: ${globalConfig.config.proxyAuthToken.isNotEmpty ? '已配置' : '未配置'}'),
               const SizedBox(height: 16),
               FilledButton.icon(
@@ -371,60 +571,79 @@ class _HomeScreenState extends State<HomeScreen> {
   void _showEditConfigDialog(String currentUrl, String currentToken) {
     final urlController = TextEditingController(text: currentUrl);
     final tokenController = TextEditingController(text: currentToken);
+    final limitController = TextEditingController(text: _sessionLimit);
     
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('编辑配置'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: urlController,
-              decoration: const InputDecoration(
-                labelText: '代理地址',
-                prefixIcon: Icon(Icons.link),
-              ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('配置'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: urlController,
+                  decoration: const InputDecoration(
+                    labelText: '代理地址',
+                    prefixIcon: Icon(Icons.link),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: tokenController,
+                  decoration: const InputDecoration(
+                    labelText: 'Token',
+                    prefixIcon: Icon(Icons.key),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: limitController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '每服务器会话数 (N)',
+                    prefixIcon: Icon(Icons.format_list_numbered),
+                    helperText: '每个服务器最多显示的会话数',
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: tokenController,
-              decoration: const InputDecoration(
-                labelText: 'Token',
-                prefixIcon: Icon(Icons.key),
-              ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final url = urlController.text.trim();
+                if (url.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('请输入代理地址')),
+                  );
+                  return;
+                }
+                final token = tokenController.text.trim();
+                final provider = context.read<GlobalConfigProvider>();
+                provider.updateConfig(GlobalConfig(
+                  mode: ConnectionMode.hermesProxy,
+                  proxyUrl: url,
+                  proxyAuthToken: token,
+                ));
+                setState(() {
+                  _sessionLimit = limitController.text.trim();
+                });
+                _saveSettings();
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('配置已保存')),
+                );
+              },
+              child: const Text('保存'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final url = urlController.text.trim();
-              if (url.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('请输入代理地址')),
-                );
-                return;
-              }
-              final token = tokenController.text.trim();
-              final provider = context.read<GlobalConfigProvider>();
-              provider.updateConfig(GlobalConfig(
-                mode: ConnectionMode.hermesProxy,
-                proxyUrl: url,
-                proxyAuthToken: token,
-              ));
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('配置已保存')),
-              );
-            },
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
   }
@@ -441,66 +660,85 @@ class _HomeScreenState extends State<HomeScreen> {
   void _showManualConfigDialog() {
     final urlController = TextEditingController();
     final tokenController = TextEditingController();
+    final limitController = TextEditingController(text: '10');
     
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('接入配置'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: urlController,
-              decoration: const InputDecoration(
-                labelText: '代理地址',
-                hintText: 'https://proxy.example.com:8080',
-                prefixIcon: Icon(Icons.link),
-              ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('接入配置'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: urlController,
+                  decoration: const InputDecoration(
+                    labelText: '代理地址',
+                    hintText: 'https://hermes-proxy.willam.eu.org',
+                    prefixIcon: Icon(Icons.link),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: tokenController,
+                  decoration: const InputDecoration(
+                    labelText: 'Token',
+                    hintText: '可选',
+                    prefixIcon: Icon(Icons.key),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: limitController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '每服务器会话数 (N)',
+                    prefixIcon: Icon(Icons.format_list_numbered),
+                    helperText: '每个服务器最多显示的会话数',
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: tokenController,
-              decoration: const InputDecoration(
-                labelText: 'Token',
-                hintText: '可选',
-                prefixIcon: Icon(Icons.key),
-              ),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _scanQR();
+              },
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('扫码'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final url = urlController.text.trim();
+                if (url.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('请输入代理地址')),
+                  );
+                  return;
+                }
+                final token = tokenController.text.trim();
+                final provider = context.read<GlobalConfigProvider>();
+                provider.updateConfig(GlobalConfig(
+                  mode: ConnectionMode.hermesProxy,
+                  proxyUrl: url,
+                  proxyAuthToken: token,
+                ));
+                setState(() {
+                  _sessionLimit = limitController.text.trim();
+                });
+                _saveSettings();
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('配置已保存')),
+                );
+              },
+              child: const Text('保存'),
             ),
           ],
         ),
-        actions: [
-          TextButton.icon(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _scanQR();
-            },
-            icon: const Icon(Icons.qr_code_scanner),
-            label: const Text('扫码'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final url = urlController.text.trim();
-              if (url.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('请输入代理地址')),
-                );
-                return;
-              }
-              final token = tokenController.text.trim();
-              final provider = context.read<GlobalConfigProvider>();
-              provider.updateConfig(GlobalConfig(
-                mode: ConnectionMode.hermesProxy,
-                proxyUrl: url,
-                proxyAuthToken: token,
-              ));
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('配置已保存')),
-              );
-            },
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
   }
@@ -541,52 +779,76 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showMenu() {
+    final serverProvider = context.read<ServerProvider>();
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('菜单', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.settings),
-              title: const Text('接入配置'),
-              subtitle: Text(context.read<GlobalConfigProvider>().config.proxyUrl.isEmpty 
-                  ? '未配置' 
-                  : '已配置: ${context.read<GlobalConfigProvider>().config.proxyUrl}'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _openConfig();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.monitor_heart),
-              title: const Text('会话清单'),
-              onTap: () {
-                Navigator.pop(ctx);
-                setState(() => _pageIndex = 0);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.assignment),
-              title: const Text('待办事项'),
-              onTap: () {
-                Navigator.pop(ctx);
-                setState(() => _pageIndex = 1);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.menu_book),
-              title: const Text('电子书库'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _openEbook();
-              },
-            ),
-          ],
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('菜单', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ),
+              ListTile(
+                leading: const Icon(Icons.settings),
+                title: const Text('接入配置'),
+                subtitle: Text(context.read<GlobalConfigProvider>().config.proxyUrl.isEmpty 
+                    ? '未配置' 
+                    : '已配置'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _openConfig();
+                },
+              ),
+              if (serverProvider.servers.isNotEmpty) ...[
+                const Divider(),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Text('服务器列表', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                ),
+                ...serverProvider.servers.map((s) => ListTile(
+                  leading: Icon(
+                    s.isOnline ? Icons.cloud_done : Icons.cloud_off,
+                    color: s.isOnline ? Colors.green : Colors.grey,
+                  ),
+                  title: Text(s.name),
+                  subtitle: Text(s.url),
+                  selected: serverProvider.activeServer?.id == s.id,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _switchServer(s.id);
+                  },
+                )),
+              ],
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.monitor_heart),
+                title: const Text('会话清单'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() => _pageIndex = 0);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.assignment),
+                title: const Text('待办事项'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() => _pageIndex = 1);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.menu_book),
+                title: const Text('电子书库'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _openEbook();
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -595,7 +857,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      const SessionMonitorScreen(),
+      _SessionMonitorTab(key: _sessionTabKey, sessionLimit: _sessionLimit),
       const TaskListScreen(),
     ];
 
@@ -609,22 +871,34 @@ class _HomeScreenState extends State<HomeScreen> {
                 value: serverProvider.activeServer?.id ?? serverProvider.servers.first.id,
                 underline: const SizedBox(),
                 dropdownColor: Theme.of(context).colorScheme.surface,
+                isExpanded: false,
                 items: [
                   const DropdownMenuItem<String>(
                     value: '__local__',
-                    child: Text('本地'),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.phone_android, size: 16),
+                        SizedBox(width: 4),
+                        Text('本地'),
+                      ],
+                    ),
                   ),
                   ...serverProvider.servers.map((s) => DropdownMenuItem<String>(
                     value: s.id,
-                    child: Text(s.name),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(s.isOnline ? Icons.cloud_done : Icons.cloud_off, size: 16,
+                          color: s.isOnline ? Colors.green : Colors.grey),
+                        const SizedBox(width: 4),
+                        Text(s.name),
+                      ],
+                    ),
                   )),
                 ],
                 onChanged: (value) {
-                  if (value == '__local__') {
-                    _switchServer(null);
-                  } else {
-                    _switchServer(value);
-                  }
+                  _switchServer(value);
                 },
               )
             : Text(_currentMode == AppMode.online ? 'hermes-reader (联网)' : 'hermes-reader (本地)'),
@@ -636,28 +910,29 @@ class _HomeScreenState extends State<HomeScreen> {
       bottomNavigationBar: BottomAppBar(
         child: Row(
           children: [
-            // Left: Menu button (always visible)
-            IconButton(
+            _BarButton(
+              icon: Icons.menu,
+              label: 'Menu',
+              active: false,
               onPressed: _showMenu,
-              icon: const Icon(Icons.menu),
-              tooltip: '菜单',
             ),
-            const Spacer(),
-            // Right: Shortcut area for apps
-            IconButton(
+            _BarButton(
+              icon: Icons.menu_book,
+              label: 'Books',
+              active: false,
               onPressed: _openEbook,
-              icon: const Icon(Icons.menu_book),
-              tooltip: '电子书',
             ),
-            IconButton(
+            _BarButton(
+              icon: Icons.monitor_heart,
+              label: 'Session',
+              active: _pageIndex == 0,
               onPressed: () => setState(() => _pageIndex = 0),
-              icon: const Icon(Icons.monitor_heart),
-              tooltip: '会话监控',
             ),
-            IconButton(
+            _BarButton(
+              icon: Icons.assignment,
+              label: 'Tasks',
+              active: _pageIndex == 1,
               onPressed: () => setState(() => _pageIndex = 1),
-              icon: const Icon(Icons.assignment),
-              tooltip: '待办事项',
             ),
           ],
         ),
@@ -666,10 +941,521 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+/// Bottom bar icon with a visible text label.
+class _BarButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onPressed;
+
+  const _BarButton({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active ? Theme.of(context).colorScheme.primary : Colors.grey;
+    return Expanded(
+      child: InkWell(
+        onTap: onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 22, color: color),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: TextStyle(fontSize: 11, color: color),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Session monitor tab that connects to all servers
+class _SessionMonitorTab extends StatefulWidget {
+  final String sessionLimit;
+
+  const _SessionMonitorTab({super.key, required this.sessionLimit});
+
+  @override
+  State<_SessionMonitorTab> createState() => _SessionMonitorTabState();
+}
+
+class _SessionMonitorTabState extends State<_SessionMonitorTab> {
+  final Map<String, List<SessionSnapshot>> _serverSessions = {};
+  bool _loading = false;
+  String? _error;
+  Timer? _pollTimer;
+  String? _shownServerId;
+  bool _onlyActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Poll for proxy client availability every 2 seconds
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      final sessionProvider = context.read<SessionProvider>();
+      final serverProvider = context.read<ServerProvider>();
+      final activeId =
+          serverProvider.activeServer?.id ?? serverProvider.servers.firstOrNull?.id;
+      if (sessionProvider.proxyClient == null || _loading) return;
+      // First load, or the user switched to a server whose sessions we
+      // haven't fetched yet.
+      if (activeId != null && _serverSessions[activeId] == null) {
+        _fetchAllSessions();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(_SessionMonitorTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionLimit != widget.sessionLimit) {
+      _fetchAllSessions();
+    }
+  }
+
+  /// Called when the user picks a different server in the app bar.
+  void onServerSwitched(String? serverId) {
+    _shownServerId = serverId;
+    if (serverId == null) return;
+    // Rebuild immediately so the header/list follow the selection, then
+    // (re)fetch just that server in the background.
+    if (mounted) setState(() {});
+    _fetchServer(serverId);
+  }
+
+  /// Fetch sessions for a single server, used when the user switches servers.
+  Future<void> _fetchServer(String serverId) async {
+    final sessionProvider = context.read<SessionProvider>();
+    final serverProvider = context.read<ServerProvider>();
+    final proxyClient = sessionProvider.proxyClient;
+    if (proxyClient == null) {
+      await _fetchAllSessions();
+      return;
+    }
+    final server =
+        serverProvider.servers.where((x) => x.id == serverId).firstOrNull;
+    if (server == null) return;
+
+    if (mounted) setState(() => _error = null);
+    try {
+      await proxyClient.connectServer(serverId);
+      final update = await proxyClient.requestSessions(serverId,
+          timeout: const Duration(seconds: 8));
+      final sessions = (update['sessions'] as List? ?? [])
+          .map<SessionSnapshot>(
+              (x) => SessionSnapshot.fromJson(x as Map<String, dynamic>))
+          .toList();
+      print('[FETCH1] Got ${sessions.length} for $serverId');
+      if (mounted) {
+        setState(() {
+          _serverSessions[serverId] = sessions;
+          _loading = false;
+        });
+      }
+      serverProvider.setServerOnline(serverId, true);
+    } catch (e) {
+      print('[FETCH1] failed $serverId: $e');
+      if (mounted) {
+        setState(() {
+          _serverSessions[serverId] = [];
+          _loading = false;
+          _error = 'Server $serverId: $e';
+        });
+      }
+      serverProvider.setServerOnline(serverId, false);
+    }
+  }
+
+  Future<void> _fetchAllSessions() async {
+    final serverProvider = context.read<ServerProvider>();
+    final globalConfig = context.read<GlobalConfigProvider>();
+    
+    if (serverProvider.servers.isEmpty) return;
+    if (!globalConfig.isProxyMode) return;
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      reader_proxy.ProxyClient? proxyClient;
+      
+      print('[FETCH] Starting to wait for proxy client...');
+      
+      // Wait for proxy client to be available (up to 30 seconds)
+      for (int i = 0; i < 300; i++) {
+        final sessionProvider = context.read<SessionProvider>();
+        proxyClient = sessionProvider.proxyClient;
+        if (proxyClient != null) break;
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      
+      print('[FETCH] Proxy client found: ${proxyClient != null}');
+      
+      if (proxyClient != null) {
+        // Wait for proxy client to be connected
+        print('[FETCH] Waiting for whenConnected...');
+        await proxyClient.whenConnected.timeout(const Duration(seconds: 15));
+        print('[FETCH] Proxy client connected, fetching sessions...');
+        if (mounted) setState(() => _loading = false);
+        
+        // Fetch servers SEQUENTIALLY (the proxy multiplexes one WS connection,
+        // concurrent polls drop responses) but update the UI incrementally so a
+        // slow server never hides already-loaded results.
+        for (final server in serverProvider.servers) {
+          try {
+            print('[FETCH] Connecting to server ${server.id}...');
+            await proxyClient!.connectServer(server.id);
+            print('[FETCH] Requesting sessions for server ${server.id}...');
+            final update = await proxyClient.requestSessions(server.id,
+                timeout: const Duration(seconds: 6));
+            final sessions = (update['sessions'] as List? ?? [])
+                .map<SessionSnapshot>((s) => SessionSnapshot.fromJson(s as Map<String, dynamic>))
+                .toList();
+            print('[FETCH] Got ${sessions.length} sessions for server ${server.id}');
+            if (sessions.isNotEmpty) {
+              final l = update['sessions'] as List;
+              print('[RAW] n=${l.length} first=${jsonEncode(l.first)}');
+              print('[RAW] last3=${l.reversed.take(3).map((e)=>e['last_active']).toList()}');
+              for (final x in l.take(3)) {
+                final p = SessionSnapshot.fromJson(x as Map<String,dynamic>);
+                print('[RAW] id=${p.id} t=${p.lastActivity} st=${p.state}');
+              }
+            }
+            if (mounted) {
+              setState(() {
+                _serverSessions[server.id] = sessions;
+                _loading = false;
+              });
+            }
+            serverProvider.setServerOnline(server.id, true);
+          } catch (e) {
+            debugPrint('Failed to fetch sessions for ${server.name}: $e');
+            if (mounted) {
+              setState(() {
+                _serverSessions[server.id] = [];
+                _loading = false;
+              });
+            }
+            serverProvider.setServerOnline(server.id, false);
+          }
+        }
+      } else {
+        final baseUrl = globalConfig.config.proxyAdminUrl;
+        final token = globalConfig.config.proxyAuthToken;
+        final limit = int.tryParse(widget.sessionLimit) ?? 10;
+        
+        for (final server in serverProvider.servers) {
+          try {
+            final resp = await http.get(
+              Uri.parse('$baseUrl/api/hermes/sessions?server_id=${server.id}&limit=$limit'),
+              headers: {'Authorization': 'Bearer $token'},
+            ).timeout(const Duration(seconds: 10));
+
+            if (resp.statusCode == 200) {
+              final data = jsonDecode(resp.body);
+              final sessions = (data is List ? data : data['sessions'] ?? [])
+                  .map<SessionSnapshot>((s) => SessionSnapshot.fromJson(s as Map<String, dynamic>))
+                  .toList();
+              _serverSessions[server.id] = sessions;
+            }
+          } catch (e) {
+            debugPrint('Failed to fetch sessions for ${server.name}: $e');
+            _serverSessions[server.id] = [];
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final serverProvider = context.watch<ServerProvider>();
+    final theme = Theme.of(context);
+
+    if (serverProvider.servers.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.dns_outlined, size: 48, color: Colors.grey),
+            const SizedBox(height: 16),
+            Text('暂无服务器', style: TextStyle(color: theme.disabledColor)),
+            const SizedBox(height: 8),
+            Text('请在菜单中添加服务器', style: TextStyle(color: theme.disabledColor, fontSize: 12)),
+          ],
+        ),
+      );
+    }
+
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_error != null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.error_outline, size: 48, color: Colors.red),
+            const SizedBox(height: 16),
+            Text('获取会话失败', style: TextStyle(color: theme.disabledColor)),
+            Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _fetchAllSessions,
+              child: const Text('重试'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Show only the currently selected server's sessions.
+    final activeServer =
+        serverProvider.activeServer ?? serverProvider.servers.firstOrNull;
+    if (activeServer == null) {
+      return const Center(child: Text('No server selected'));
+    }
+    final all = List<SessionSnapshot>.from(
+        _serverSessions[activeServer.id] ?? const <SessionSnapshot>[]);
+    // Most recently active first, so live sessions surface at the top.
+    all.sort((a, b) => b.lastActivity.compareTo(a.lastActivity));
+    final sessions = all;
+
+    if (sessions.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _fetchAllSessions,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(
+              height: MediaQuery.of(context).size.height * 0.6,
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.inbox, size: 48, color: Colors.grey),
+                    const SizedBox(height: 16),
+                    Text('No sessions on ${activeServer.name}',
+                        style: TextStyle(color: theme.disabledColor)),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: _fetchAllSessions,
+                      child: const Text('Refresh'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final shown = _onlyActive
+        ? sessions.where((x) => x.state == SessionState.running).toList()
+        : sessions;
+
+    if (shown.isEmpty && _onlyActive) {
+      return RefreshIndicator(
+        onRefresh: _fetchAllSessions,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(
+              height: MediaQuery.of(context).size.height * 0.6,
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.check_circle_outline, size: 48, color: Colors.grey),
+                    const SizedBox(height: 16),
+                    const Text('No running sessions'),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: () => setState(() => _onlyActive = false),
+                      child: const Text('Show all'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _fetchAllSessions,
+      child: ListView.builder(
+        itemCount: shown.length + 1,
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: theme.colorScheme.surfaceContainerHighest,
+              child: Row(
+                children: [
+                  Icon(
+                    activeServer.isOnline ? Icons.cloud_done : Icons.cloud_off,
+                    size: 16,
+                    color: activeServer.isOnline ? Colors.green : Colors.grey,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(activeServer.name,
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                  Text('${shown.length} sessions',
+                      style: TextStyle(color: theme.disabledColor, fontSize: 12)),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: () => setState(() => _onlyActive = !_onlyActive),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _onlyActive
+                              ? Icons.check_box
+                              : Icons.check_box_outline_blank,
+                          size: 16,
+                          color: _onlyActive
+                              ? theme.colorScheme.primary
+                              : Colors.grey,
+                        ),
+                        const SizedBox(width: 2),
+                        const Text('Active', style: TextStyle(fontSize: 11)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+          final s = shown[index - 1];
+          final running = s.state == SessionState.running;
+          return ListTile(
+            leading: Icon(
+              running
+                  ? Icons.play_circle
+                  : s.state == SessionState.stopped
+                      ? Icons.stop_circle
+                      : s.state == SessionState.pending
+                          ? Icons.help_outline
+                          : Icons.error,
+              color: running
+                  ? Colors.green
+                  : s.state == SessionState.stopped
+                      ? Colors.grey
+                      : s.state == SessionState.pending
+                          ? Colors.orange
+                          : Colors.red,
+            ),
+            title: Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+            subtitle: Text(_formatTime(s.lastActivity)),
+            trailing: Text(s.state.name, style: const TextStyle(fontSize: 11)),
+          );
+        },
+      ),
+    );
+  }
+
+  String _formatTime(DateTime t) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} '
+        '${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
+  }
+
+  Widget _oldBuild(BuildContext context) {
+    final serverProvider = context.watch<ServerProvider>();
+    final theme = Theme.of(context);
+    return RefreshIndicator(
+      onRefresh: _fetchAllSessions,
+      child: ListView.builder(
+        itemCount: serverProvider.servers.length,
+        itemBuilder: (context, index) {
+          final server = serverProvider.servers[index];
+          final sessions = _serverSessions[server.id] ?? [];
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                color: theme.colorScheme.surfaceContainerHighest,
+                child: Row(
+                  children: [
+                    Icon(
+                      server.isOnline ? Icons.cloud_done : Icons.cloud_off,
+                      size: 16,
+                      color: server.isOnline ? Colors.green : Colors.grey,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(server.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    Text('${sessions.length} 个会话', style: TextStyle(color: theme.disabledColor, fontSize: 12)),
+                  ],
+                ),
+              ),
+              ...sessions.map((s) => ListTile(
+                leading: Icon(
+                  s.state == SessionState.running ? Icons.play_circle :
+                  s.state == SessionState.stopped ? Icons.stop_circle :
+                  s.state == SessionState.pending ? Icons.help_outline :
+                  Icons.error,
+                  color: s.state == SessionState.running ? Colors.green :
+                         s.state == SessionState.stopped ? Colors.grey :
+                         s.state == SessionState.pending ? Colors.orange : Colors.red,
+                ),
+                title: Text(s.title),
+                subtitle: Text('${s.lastActivity}'),
+                trailing: Text(s.state.name, style: const TextStyle(fontSize: 11)),
+              )),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
 /// Connection dialog that tests connectivity and fetches servers
 class _ConnectionDialog extends StatefulWidget {
   final Map<String, String> config;
-  final void Function(String proxyUrl, String token, List<Map<String, dynamic>> servers) onConnected;
+  final Future<void> Function(String proxyUrl, String token, List<dynamic> servers) onConnected;
   final void Function(String error) onFailed;
   final VoidCallback onCancel;
 
@@ -697,79 +1483,43 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
   Future<void> _connect() async {
     final wsUrl = widget.config['ws_url'] ?? '';
     final token = widget.config['token'] ?? '';
-    final adminUrl = widget.config['admin_url'] ?? '';
 
     if (_cancelled) return;
-
-    // Parse admin URL to get base URL
-    String baseUrl = adminUrl;
-    if (baseUrl.endsWith('/')) {
-      baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-    }
 
     setState(() => _status = '正在测试连通性...');
 
     try {
-      // Test connectivity via /health
-      final healthUrl = baseUrl.replaceAll('/api/config', '/health').replaceAll('/ws', '');
-      final healthResponse = await http.get(Uri.parse(healthUrl)).timeout(
-        const Duration(seconds: 10),
+      // Test connectivity via WebSocket DI protocol
+      final proxyClient = reader_proxy.ProxyClient(
+        proxyUrl: wsUrl,
+        authToken: token,
       );
+      
+      await proxyClient.connect();
       
       if (_cancelled) return;
 
-      if (healthResponse.statusCode != 200) {
-        widget.onFailed('服务器返回 HTTP ${healthResponse.statusCode}');
-        return;
-      }
-
-      setState(() => _status = '正在验证 Token...');
-
-      // Test token validity
-      final configResponse = await http.get(
-        Uri.parse('$baseUrl/api/config'),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 10));
-
-      if (_cancelled) return;
-
-      if (configResponse.statusCode == 401) {
-        widget.onFailed('Token 无效（401 Unauthorized）');
-        return;
-      }
-
-      if (configResponse.statusCode != 200) {
-        widget.onFailed('Token 验证失败: HTTP ${configResponse.statusCode}');
-        return;
-      }
-
       setState(() => _status = '正在获取服务器列表...');
 
-      // Fetch servers
-      final serversResponse = await http.get(
-        Uri.parse('$baseUrl/api/servers'),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 10));
-
-      if (_cancelled) return;
-
+      // Fetch servers via DI protocol
       List<Map<String, dynamic>> servers = [];
-      if (serversResponse.statusCode == 200) {
-        final data = jsonDecode(serversResponse.body);
-        if (data is Map && data['servers'] is List) {
-          servers = (data['servers'] as List).map((s) => s as Map<String, dynamic>).toList();
-        }
+      try {
+        servers = await proxyClient.fetchServersDI();
+      } catch (e) {
+        debugPrint('Failed to fetch servers via DI: $e');
       }
 
       if (_cancelled) return;
 
-      // Extract proxy URL from admin URL
-      String proxyUrl = adminUrl;
+      // Extract proxy URL from ws_url (strip /ws path)
+      String proxyUrl = wsUrl;
       if (proxyUrl.contains('/ws')) {
         proxyUrl = proxyUrl.replaceAll('/ws', '');
       }
 
-      widget.onConnected(proxyUrl, token, servers);
+      print('[DIALOG] About to call onConnected, servers=${servers.length}');
+      await widget.onConnected(proxyUrl, token, servers);
+      print('[DIALOG] onConnected call returned');
 
     } catch (e) {
       if (_cancelled) return;
