@@ -1056,6 +1056,11 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
 
     if (mounted) setState(() => _error = null);
     try {
+      if (!proxyClient.isConnected) {
+        await proxyClient.connect();
+        await proxyClient.whenConnected
+            .timeout(const Duration(seconds: 15));
+      }
       await proxyClient.connectServer(serverId);
       final update = await proxyClient.requestSessions(serverId,
           timeout: const Duration(seconds: 8));
