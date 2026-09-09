@@ -995,12 +995,22 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
   bool _loading = false;
   String? _error;
   Timer? _pollTimer;
+  Timer? _autoRefreshTimer;
   String? _shownServerId;
   bool _onlyActive = false;
+  final Set<String> _alerted = {};
 
   @override
   void initState() {
     super.initState();
+    // Periodically refresh the active server so newly-stopped sessions
+    // surface without the user pulling to refresh.
+    _autoRefreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (!mounted) return;
+      final id = context.read<ServerProvider>().activeServer?.id;
+      if (id != null) _fetchServer(id, quiet: true);
+    });
+
     // Poll for proxy client availability every 2 seconds
     _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!mounted) return;
@@ -1008,10 +1018,11 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
       final serverProvider = context.read<ServerProvider>();
       final activeId =
           serverProvider.activeServer?.id ?? serverProvider.servers.firstOrNull?.id;
-      if (sessionProvider.proxyClient == null || _loading) return;
-      // First load, or the user switched to a server whose sessions we
-      // haven't fetched yet.
-      if (activeId != null && _serverSessions[activeId] == null) {
+      if (sessionProvider.proxyClient == null || _loading || _fetchingAll) return;
+      // Only kick off the full sweep once, for the very first load.
+      if (activeId != null &&
+          _serverSessions[activeId] == null &&
+          _serverSessions.isEmpty) {
         _fetchAllSessions();
       }
     });
@@ -1020,6 +1031,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _autoRefreshTimer?.cancel();
     super.dispose();
   }
 
@@ -1042,7 +1054,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
   }
 
   /// Fetch sessions for a single server, used when the user switches servers.
-  Future<void> _fetchServer(String serverId) async {
+  Future<void> _fetchServer(String serverId, {bool quiet = false}) async {
     final sessionProvider = context.read<SessionProvider>();
     final serverProvider = context.read<ServerProvider>();
     final proxyClient = sessionProvider.proxyClient;
@@ -1069,6 +1081,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
               (x) => SessionSnapshot.fromJson(x as Map<String, dynamic>))
           .toList();
       print('[FETCH1] Got ${sessions.length} for $serverId');
+      if (quiet) _detectChanges(serverId, sessions);
       if (mounted) {
         setState(() {
           _serverSessions[serverId] = sessions;
@@ -1078,7 +1091,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
       serverProvider.setServerOnline(serverId, true);
     } catch (e) {
       print('[FETCH1] failed $serverId: $e');
-      if (mounted) {
+      if (mounted && !quiet) {
         setState(() {
           _serverSessions[serverId] = [];
           _loading = false;
@@ -1089,7 +1102,68 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
     }
   }
 
+  /// Compare a fresh poll against the previous one and alert the user about
+  /// sessions that just stopped or started waiting for input.
+  void _detectChanges(String serverId, List<SessionSnapshot> fresh) {
+    final previous = _serverSessions[serverId];
+    if (previous == null || previous.isEmpty) return;
+
+    final prevMap = {for (final s in previous) s.id: s};
+    final freshIds = fresh.map((s) => s.id).toSet();
+
+    final stopped = <SessionSnapshot>[];
+    final needsInput = <SessionSnapshot>[];
+
+    for (final snap in fresh) {
+      final prev = prevMap[snap.id];
+      if (prev == null) continue;
+      if (prev.state != snap.state) {
+        if (snap.state == SessionState.stopped) stopped.add(snap);
+        if (snap.state == SessionState.pending) needsInput.add(snap);
+      }
+    }
+    // Sessions that vanished from the listing are treated as stopped.
+    for (final snap in previous) {
+      if (!freshIds.contains(snap.id)) stopped.add(snap);
+    }
+
+    for (final s in stopped) {
+      if (!_alerted.add('$serverId:${s.id}:stopped')) continue;
+      _notify('Session finished', s.title, serverId);
+    }
+    for (final s in needsInput) {
+      if (!_alerted.add('$serverId:${s.id}:pending')) continue;
+      _notify('Session needs input', s.title, serverId);
+    }
+  }
+
+  void _notify(String title, String body, String serverId) {
+    if (!mounted) return;
+    final name = context.read<ServerProvider>().servers
+        .where((x) => x.id == serverId)
+        .firstOrNull
+        ?.name;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$title${name != null ? ' ($name)' : ''}: $body'),
+        duration: const Duration(seconds: 6),
+      ),
+    );
+  }
+
+  bool _fetchingAll = false;
+
   Future<void> _fetchAllSessions() async {
+    if (_fetchingAll) return;
+    _fetchingAll = true;
+    try {
+      await _doFetchAllSessions();
+    } finally {
+      _fetchingAll = false;
+    }
+  }
+
+  Future<void> _doFetchAllSessions() async {
     final serverProvider = context.read<ServerProvider>();
     final globalConfig = context.read<GlobalConfigProvider>();
     

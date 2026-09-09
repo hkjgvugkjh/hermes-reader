@@ -62,7 +62,7 @@ class LibraryService {
     final dir = sandbox.resolveDir(subdir);
 
     final response = await transport.get(
-      '/api/hermes/files/list?path=${Uri.encodeComponent(dir)}',
+      '/api/studio/files/list?path=${Uri.encodeComponent(dir)}',
     );
     print('[SHELF] GET dir=$dir status=${response.statusCode} bodyLen=${response.body?.length ?? 0}');
 
@@ -128,7 +128,7 @@ class LibraryService {
     sandbox.checkTransfer(book.sizeBytes);
 
     final response = await transport.get(
-      '/api/hermes/files/read?path=${Uri.encodeComponent(safePath)}',
+      '/api/studio/files/read?path=${Uri.encodeComponent(safePath)}',
     );
 
     if (!response.isOk) {
