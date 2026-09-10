@@ -138,6 +138,16 @@ class MonitorTarget {
   final String serverId;
   final String baseUrl;
   final String? authToken;
+
+  /// Credentials forwarded to the proxy on DI connect. Required whenever the
+  /// proxy has no stored credentials for this server, otherwise mcu-login
+  /// fails and the connect just times out.
+  final String? username;
+  final String? password;
+
+  /// hermes_studio profile to bind to.
+  final String? profile;
+
   final Duration pollInterval;
   final Duration stoppedThreshold;
 
@@ -145,6 +155,9 @@ class MonitorTarget {
     required this.serverId,
     required this.baseUrl,
     this.authToken,
+    this.username,
+    this.password,
+    this.profile,
     this.pollInterval = const Duration(seconds: 60),
     this.stoppedThreshold = const Duration(seconds: 90),
   });

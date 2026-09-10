@@ -233,7 +233,19 @@ class ProxyClient {
   }
 
   /// Connect to a specific server via DI protocol (TypeDIConnect=0x30)
-  Future<void> connectServer(String serverId) async {
+  ///
+  /// Credentials are REQUIRED for a server the proxy has no stored creds for:
+  /// without them the proxy's mcu-login fails and the client just waits for a
+  /// ConnectAck that never comes, surfacing as an 8s timeout. Callers must pass
+  /// [username]/[password] (and optionally [profile]) from their ServerConfig.
+  Future<void> connectServer(
+    String serverId, {
+    String? username,
+    String? password,
+    String? profile,
+    String? deviceCode,
+    String? instanceId,
+  }) async {
     if (!_connected || _channel == null) {
       throw StateError('Not connected');
     }
@@ -241,7 +253,26 @@ class ProxyClient {
     final completer = Completer<void>();
     _connectCompleters[serverId] = completer;
 
-    final payload = jsonEncode({'server_id': serverId});
+    // Build a complete payload; omit empty fields so server-side defaults stay
+    // in effect rather than being overwritten with "".
+    final payloadMap = <String, dynamic>{'server_id': serverId};
+    if (username != null && username.isNotEmpty) {
+      payloadMap['username'] = username;
+    }
+    if (password != null && password.isNotEmpty) {
+      payloadMap['password'] = password;
+    }
+    if (profile != null && profile.isNotEmpty) {
+      payloadMap['profile'] = profile;
+    }
+    if (deviceCode != null && deviceCode.isNotEmpty) {
+      payloadMap['device_code'] = deviceCode;
+    }
+    if (instanceId != null && instanceId.isNotEmpty) {
+      payloadMap['instance_id'] = instanceId;
+    }
+
+    final payload = jsonEncode(payloadMap);
     final encrypted = await _encrypt(payload);
 
     final frame = BytesBuilder();
@@ -252,7 +283,8 @@ class ProxyClient {
     frame.add(lengthBytes);
     frame.add(encrypted);
     _channel!.sink.add(frame.toBytes());
-    print('[DI] Sent TypeDIConnect(0x30) server_id=$serverId');
+    final sent = List<String>.of(payloadMap.keys)..remove('server_id');
+    print('[DI] Sent TypeDIConnect(0x30) server_id=$serverId with=$sent');
 
     // Wait for TypeDIConnectAck
     await completer.future.timeout(timeout);

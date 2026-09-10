@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:hermes_shared/hermes_shared.dart';
+import 'package:hermes_shared/hermes_shared.dart' hide ServerConfig;
 import 'reader/providers/library_provider.dart';
 import 'reader/providers/session_provider.dart';
 import 'reader/providers/task_provider.dart';
@@ -496,6 +496,40 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _currentMode = AppMode.online;
     });
+
+    // Switching must actually attach the proxy to the new backend. Previously
+    // this only mutated local state, so the proxy never dialled the server and
+    // every later request for it timed out.
+    _attachServer(server);
+  }
+
+  /// Attach the proxy to [server], sending full credentials.
+  ///
+  /// Fire-and-forget: a failure is surfaced as a snackbar rather than blocking
+  /// the UI, because reading must never be blocked by session plumbing.
+  void _attachServer(ServerConfig server) {
+    final proxyClient = context.read<SessionProvider>().proxyClient;
+    if (proxyClient == null || !proxyClient.isConnected) {
+      return;
+    }
+    unawaited(
+      proxyClient
+          .connectServer(
+        server.id,
+        username: server.username,
+        password: server.password,
+        profile: server.profile,
+      )
+          .then((_) {
+        debugPrint('[SWITCH] attached ${server.id}');
+      }).catchError((Object e) {
+        debugPrint('[SWITCH] attach ${server.id} failed: $e');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('无法连接 ${server.name}: $e')),
+        );
+      }),
+    );
   }
 
   void _disconnect() {
@@ -1073,7 +1107,12 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
         await proxyClient.whenConnected
             .timeout(const Duration(seconds: 15));
       }
-      await proxyClient.connectServer(serverId);
+      await proxyClient.connectServer(
+        serverId,
+        username: server.username,
+        password: server.password,
+        profile: server.profile,
+      );
       final update = await proxyClient.requestSessions(serverId,
           timeout: const Duration(seconds: 8));
       final sessions = (update['sessions'] as List? ?? [])
@@ -1203,7 +1242,12 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
         for (final server in serverProvider.servers) {
           try {
             print('[FETCH] Connecting to server ${server.id}...');
-            await proxyClient!.connectServer(server.id);
+            await proxyClient!.connectServer(
+              server.id,
+              username: server.username,
+              password: server.password,
+              profile: server.profile,
+            );
             print('[FETCH] Requesting sessions for server ${server.id}...');
             final update = await proxyClient.requestSessions(server.id,
                 timeout: const Duration(seconds: 6));

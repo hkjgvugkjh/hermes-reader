@@ -74,7 +74,12 @@ class SessionProvider extends ChangeNotifier {
     _monitor!.addTarget(target);
     // Connect to the server via DI protocol first, then start monitoring
     if (_proxyClient != null && _proxyClient!.isConnected) {
-      await _proxyClient!.connectServer(target.serverId);
+      await _proxyClient!.connectServer(
+        target.serverId,
+        username: target.username,
+        password: target.password,
+        profile: target.profile,
+      );
     }
     if (!_monitor!.isRunning) {
       await _monitor!.start();
