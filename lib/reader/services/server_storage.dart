@@ -1,19 +1,32 @@
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import '../models/hive_models.dart';
 
-/// Persistent storage for server configurations
+/// Persistent storage for server configurations using JSON files.
+/// All configs are stored in app documents directory as JSON files.
 class ServerStorage {
-  static const String _keyServers = 'hermes_hive_servers';
-  static const String _keyActiveServer = 'hermes_hive_active_server';
+  static String? _cachePath;
+
+  static Future<String> _dirPath() async {
+    if (_cachePath != null) return _cachePath!;
+    final dir = await getApplicationDocumentsDirectory();
+    _cachePath = '${dir.path}/hermes_reader';
+    return _cachePath!;
+  }
+
+  static Future<File> _serversFile() async {
+    final dir = await _dirPath();
+    return Directory(dir).create(recursive: true).then((_) => File('$dir/servers.json'));
+  }
 
   /// Load all saved server configs
   static Future<List<ServerConfig>> loadServers() async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonStr = prefs.getString(_keyServers);
-    if (jsonStr == null || jsonStr.isEmpty) return [];
-
     try {
+      final file = await _serversFile();
+      if (!await file.exists()) return [];
+      final jsonStr = await file.readAsString();
+      if (jsonStr.isEmpty) return [];
       final list = jsonDecode(jsonStr) as List;
       return list
           .map((s) => ServerConfig.fromJson(s as Map<String, dynamic>))
@@ -25,23 +38,45 @@ class ServerStorage {
 
   /// Save all server configs
   static Future<bool> saveServers(List<ServerConfig> servers) async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonStr = jsonEncode(servers.map((s) => s.toJson()).toList());
-    return prefs.setString(_keyServers, jsonStr);
+    try {
+      final file = await _serversFile();
+      final jsonStr = jsonEncode(servers.map((s) => s.toJson()).toList());
+      await file.writeAsString(jsonStr);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  static Future<File> _activeServerFile() async {
+    final dir = await _dirPath();
+    return Directory(dir).create(recursive: true).then((_) => File('$dir/active_server.txt'));
   }
 
   /// Get active server ID
   static Future<String?> getActiveServerId() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_keyActiveServer);
+    try {
+      final file = await _activeServerFile();
+      if (!await file.exists()) return null;
+      final id = await file.readAsString();
+      return id.isEmpty ? null : id;
+    } catch (e) {
+      return null;
+    }
   }
 
   /// Set active server ID
   static Future<bool> setActiveServerId(String? serverId) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (serverId == null) {
-      return prefs.remove(_keyActiveServer);
+    try {
+      final file = await _activeServerFile();
+      if (serverId == null) {
+        if (await file.exists()) await file.delete();
+        return true;
+      }
+      await file.writeAsString(serverId);
+      return true;
+    } catch (e) {
+      return false;
     }
-    return prefs.setString(_keyActiveServer, serverId);
   }
 }

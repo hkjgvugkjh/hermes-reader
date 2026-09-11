@@ -19,47 +19,34 @@ class DirectFileTransport implements FileTransport {
 
   String? _token;
 
-  /// Supplies the JWT obtained during login, if the server required one.
   void setToken(String? token) => _token = token;
 
-  /// Refreshes the token using the same flow as HermesApiClient.
   Future<bool> ensureLoggedIn() async {
-    final statusUri = Uri.parse('${server.baseUrl}/api/auth/status');
     try {
-      final statusResp =
-          await _client.get(statusUri).timeout(const Duration(seconds: 10));
-      if (statusResp.statusCode != 200) return _token != null;
-
-      final status = _decode(statusResp.body);
-      final authEnabled = (status['hasPasswordLogin'] == true) ||
-          (status['hasUsers'] == true);
+      final uri = Uri.parse('${server.baseUrl}/api/auth/status');
+      final resp = await _client.get(uri).timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200) return _token != null;
+      final body = _decode(resp.body);
+      final authEnabled = body['hasPasswordLogin'] == true || body['hasUsers'] == true;
       if (!authEnabled) return true;
-
       if (_token != null) {
-        final meResp = await _client
-            .get(
-              Uri.parse('${server.baseUrl}/api/auth/me'),
-              headers: {'Authorization': 'Bearer $_token'},
-            )
+        final me = await _client
+            .get(Uri.parse('${server.baseUrl}/api/auth/me'),
+                headers: {'Authorization': 'Bearer $_token'})
             .timeout(const Duration(seconds: 10));
-        if (meResp.statusCode == 200) return true;
+        if (me.statusCode == 200) return true;
       }
-
       if (server.username == null || server.username!.isEmpty) return false;
-
-      final loginResp = await _client
-          .post(
-            Uri.parse('${server.baseUrl}/api/auth/login'),
-            headers: {'Content-Type': 'application/json'},
-            body: _encode({
-              'username': server.username,
-              'password': server.password ?? '',
-            }),
-          )
+      final login = await _client
+          .post(Uri.parse('${server.baseUrl}/api/auth/login'),
+              headers: {'Content-Type': 'application/json'},
+              body: _encode({
+                'username': server.username,
+                'password': server.password ?? '',
+              }))
           .timeout(const Duration(seconds: 15));
-
-      if (loginResp.statusCode != 200) return false;
-      final data = _decode(loginResp.body);
+      if (login.statusCode != 200) return false;
+      final data = _decode(login.body);
       _token = data['token'] as String?;
       return _token != null;
     } catch (_) {
@@ -68,33 +55,24 @@ class DirectFileTransport implements FileTransport {
   }
 
   @override
-  Future<TransportResponse> get(
-    String path, {
-    Map<String, String>? headers,
-  }) async {
+  Future<TransportResponse> get(String path, {Map<String, String>? headers}) async {
     final uri = Uri.parse('${server.baseUrl}$path');
     final merged = <String, String>{
       'X-Hermes-Profile': server.profile,
       if (_token != null) 'Authorization': 'Bearer $_token',
       ...?headers,
     };
-
-    final response =
-        await _client.get(uri, headers: merged).timeout(const Duration(minutes: 2));
-
+    final resp = await _client.get(uri, headers: merged).timeout(const Duration(minutes: 2));
     return TransportResponse(
-      statusCode: response.statusCode,
-      body: Uint8List.fromList(response.bodyBytes),
-      headers: response.headers,
+      statusCode: resp.statusCode,
+      body: Uint8List.fromList(resp.bodyBytes),
+      headers: resp.headers,
     );
   }
 
   void dispose() => _client.close();
 
-  static Map<String, dynamic> _decode(String body) {
-    // ignore: avoid_dynamic_calls
-    return (jsonDecode(body) as Map?)?.cast<String, dynamic>() ?? {};
-  }
-
-  static String _encode(Map<String, dynamic> value) => jsonEncode(value);
+  static Map<String, dynamic> _decode(String body) =>
+      (jsonDecode(body) as Map?)?.cast<String, dynamic>() ?? {};
+  static String _encode(Map<String, dynamic> v) => jsonEncode(v);
 }

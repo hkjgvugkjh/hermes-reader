@@ -552,55 +552,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showConfigAndScan() {
-    final globalConfig = context.read<GlobalConfigProvider>();
-    showModalBottomSheet(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text('当前配置', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 12),
-              Text('代理地址: ${globalConfig.config.proxyUrl}'),
-              Text('WS 端口: ${globalConfig.config.proxyWsPort}'),
-              Text('Token: ${globalConfig.config.proxyAuthToken.isNotEmpty ? '已配置' : '未配置'}'),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _scanQR();
-                },
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('扫码更换'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _showEditConfigDialog(globalConfig.config.proxyUrl, globalConfig.config.proxyAuthToken);
-                },
-                icon: const Icon(Icons.edit),
-                label: const Text('手动编辑'),
-              ),
-              const SizedBox(height: 8),
-              TextButton.icon(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _disconnect();
-                },
-                icon: const Icon(Icons.link_off),
-                label: const Text('断开连接'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+
 
   void _showEditConfigDialog(String currentUrl, String currentToken) {
     final urlController = TextEditingController(text: currentUrl);
@@ -684,15 +636,203 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _openConfig() {
     final globalConfig = context.read<GlobalConfigProvider>();
-    if (globalConfig.config.proxyUrl.isEmpty) {
-      _showManualConfigDialog();
+    if (globalConfig.isProxyMode) {
+      _showProxyConfigSheet(globalConfig);
     } else {
-      _showConfigAndScan();
+      _showStandaloneConfigSheet(globalConfig);
     }
   }
 
+  void _showProxyConfigSheet(GlobalConfigProvider globalConfig) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text('当前配置', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              Text('代理地址: ${globalConfig.config.proxyUrl}'),
+              Text('WS 端口: ${globalConfig.config.proxyWsPort}'),
+              Text('Token: ${globalConfig.config.proxyAuthToken.isNotEmpty ? '已配置' : '未配置'}'),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _scanQR();
+                },
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('扫码更换'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showEditConfigDialog(globalConfig.config.proxyUrl, globalConfig.config.proxyAuthToken);
+                },
+                icon: const Icon(Icons.edit),
+                label: const Text('手动编辑'),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _disconnect();
+                },
+                icon: const Icon(Icons.link_off),
+                label: const Text('断开连接'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showStandaloneConfigSheet(GlobalConfigProvider globalConfig) {
+    final serverProvider = context.read<ServerProvider>();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text('独立模式 — 服务器列表', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              ...serverProvider.servers.map((s) => ListTile(
+                    title: Text(s.name),
+                    subtitle: Text(s.url),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.edit, size: 20),
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            _showEditServerDialog(s);
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, size: 20, color: Colors.red),
+                          onPressed: () async {
+                            await serverProvider.removeServer(s.id);
+                            if (ctx.mounted) Navigator.pop(ctx);
+                          },
+                        ),
+                      ],
+                    ),
+                  )),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showAddServerDialog();
+                },
+                icon: const Icon(Icons.add),
+                label: const Text('添加服务器'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAddServerDialog() {
+    final idCtrl = TextEditingController();
+    final nameCtrl = TextEditingController();
+    final urlCtrl = TextEditingController();
+    final userCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('添加服务器'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: idCtrl, decoration: const InputDecoration(labelText: 'ID (唯一)')),
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: '名称')),
+              TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'URL', hintText: 'http://10.10.164.32:8648')),
+              TextField(controller: userCtrl, decoration: const InputDecoration(labelText: '用户名 (可选)')),
+              TextField(controller: passCtrl, decoration: const InputDecoration(labelText: '密码 (可选)'), obscureText: true),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              final id = idCtrl.text.trim();
+              if (id.isEmpty) return;
+              final server = ServerConfig(
+                id: id,
+                name: nameCtrl.text.trim().isEmpty ? id : nameCtrl.text.trim(),
+                url: urlCtrl.text.trim(),
+                username: userCtrl.text.trim().isEmpty ? null : userCtrl.text.trim(),
+                password: passCtrl.text.trim().isEmpty ? null : passCtrl.text.trim(),
+              );
+              context.read<ServerProvider>().addServer(server);
+              Navigator.pop(ctx);
+            },
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showEditServerDialog(ServerConfig server) {
+    final nameCtrl = TextEditingController(text: server.name);
+    final urlCtrl = TextEditingController(text: server.url);
+    final userCtrl = TextEditingController(text: server.username ?? '');
+    final passCtrl = TextEditingController(text: server.password ?? '');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('编辑 ${server.name}'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: '名称')),
+              TextField(controller: urlCtrl, decoration: const InputDecoration(labelText: 'URL')),
+              TextField(controller: userCtrl, decoration: const InputDecoration(labelText: '用户名')),
+              TextField(controller: passCtrl, decoration: const InputDecoration(labelText: '密码'), obscureText: true),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () {
+              final updated = ServerConfig(
+                id: server.id,
+                name: nameCtrl.text.trim(),
+                url: urlCtrl.text.trim(),
+                username: userCtrl.text.trim().isEmpty ? null : userCtrl.text.trim(),
+                password: passCtrl.text.trim().isEmpty ? null : passCtrl.text.trim(),
+              );
+              context.read<ServerProvider>().updateServer(updated);
+              Navigator.pop(ctx);
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showManualConfigDialog() {
-    final urlController = TextEditingController();
+    final urlController = TextEditingController(text: 'https://hermes-proxy.willam.eu.org');
     final tokenController = TextEditingController();
     final limitController = TextEditingController(text: '10');
     
@@ -812,6 +952,60 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _showModeSelector() {
+    final globalConfig = context.read<GlobalConfigProvider>();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选择模式'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RadioListTile<bool>(
+              title: const Text('代理模式'),
+              subtitle: const Text('通过 hermes-proxy 连接多个服务器'),
+              value: true,
+              groupValue: globalConfig.isProxyMode,
+              onChanged: (_) {
+                Navigator.pop(ctx);
+                _switchToProxyMode();
+              },
+            ),
+            RadioListTile<bool>(
+              title: const Text('独立模式'),
+              subtitle: const Text('直接连接服务器，手动增删改'),
+              value: false,
+              groupValue: globalConfig.isProxyMode,
+              onChanged: (_) {
+                Navigator.pop(ctx);
+                _switchToStandaloneMode();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _switchToProxyMode() async {
+    final globalConfig = context.read<GlobalConfigProvider>();
+    if (globalConfig.config.proxyUrl.isEmpty) {
+      _showManualConfigDialog();
+    } else {
+      // Already has proxy config, just trigger reconnect
+      final sessionProvider = context.read<SessionProvider>();
+      sessionProvider.clearProxyClient();
+      if (mounted) setState(() => _currentMode = AppMode.online);
+      _autoConnect();
+    }
+  }
+
+  Future<void> _switchToStandaloneMode() async {
+    final sessionProvider = context.read<SessionProvider>();
+    sessionProvider.clearProxyClient();
+    if (mounted) setState(() => _currentMode = AppMode.local);
+  }
+
   void _showMenu() {
     final serverProvider = context.read<ServerProvider>();
     showModalBottomSheet(
@@ -825,6 +1019,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: EdgeInsets.all(16),
                 child: Text('菜单', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               ),
+              ListTile(
+                leading: const Icon(Icons.swap_horiz),
+                title: Text('当前模式: ${context.read<GlobalConfigProvider>().isProxyMode ? '代理' : '独立'}'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showModeSelector();
+                },
+              ),
+              const Divider(),
               ListTile(
                 leading: const Icon(Icons.settings),
                 title: const Text('接入配置'),

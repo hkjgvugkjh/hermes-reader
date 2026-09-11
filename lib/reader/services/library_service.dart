@@ -57,9 +57,9 @@ class LibraryService {
     required FileTransport transport,
     required String serverId,
     required String serverName,
-    String subdir = '',
+    String subdir = '/',
   }) async {
-    final dir = sandbox.resolveDir(subdir);
+    final dir = subdir.isEmpty || subdir == '.' ? '/' : sandbox.resolveDir(subdir);
 
     final response = await transport.get(
       '/api/studio/files/list?path=${Uri.encodeComponent(dir)}',

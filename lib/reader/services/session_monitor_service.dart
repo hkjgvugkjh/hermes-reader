@@ -230,6 +230,10 @@ class SessionMonitorService {
     _proxyClient = client;
   }
 
+  void clearProxyClient() {
+    _proxyClient = null;
+  }
+
   /// Begin polling all targets.
   Future<void> start() async {
     if (_running) return;

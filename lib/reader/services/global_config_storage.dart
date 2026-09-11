@@ -1,18 +1,30 @@
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import '../models/global_config.dart';
+import 'server_storage.dart';
 
-/// Persistent storage for global configuration
+/// Persistent storage for global configuration using a JSON file.
+/// Stores in app documents directory so it survives when the app is backgrounded.
 class GlobalConfigStorage {
-  static const String _keyGlobalConfig = 'hermes_hive_global_config';
+  static String? _cachePath;
 
-  /// Load global config from storage
+  static Future<String> _filePath() async {
+    if (_cachePath != null) return _cachePath!;
+    // Use the same directory as ServerStorage for consistency
+    final dir = await getApplicationDocumentsDirectory();
+    _cachePath = '${dir.path}/hermes_reader_config.json';
+    return _cachePath!;
+  }
+
+  /// Load global config from file
   static Future<GlobalConfig> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonStr = prefs.getString(_keyGlobalConfig);
-    if (jsonStr == null || jsonStr.isEmpty) return GlobalConfig();
-
     try {
+      final path = await _filePath();
+      final file = File(path);
+      if (!await file.exists()) return GlobalConfig();
+      final jsonStr = await file.readAsString();
+      if (jsonStr.isEmpty) return GlobalConfig();
       final data = jsonDecode(jsonStr) as Map<String, dynamic>;
       return GlobalConfig.fromJson(data);
     } catch (e) {
@@ -20,10 +32,19 @@ class GlobalConfigStorage {
     }
   }
 
-  /// Save global config to storage
+  /// Save global config to file
   static Future<bool> save(GlobalConfig config) async {
-    final prefs = await SharedPreferences.getInstance();
-    final jsonStr = jsonEncode(config.toJson());
-    return prefs.setString(_keyGlobalConfig, jsonStr);
+    try {
+      final path = await _filePath();
+      final file = File(path);
+      final jsonStr = jsonEncode(config.toJson());
+      await file.writeAsString(jsonStr);
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
+
+  /// Debug: get the config file path
+  static Future<String> debugPath() => _filePath();
 }

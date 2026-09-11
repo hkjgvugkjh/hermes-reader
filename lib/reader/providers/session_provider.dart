@@ -124,6 +124,14 @@ class SessionProvider extends ChangeNotifier {
     if (!_initialized) init();
   }
 
+  void clearProxyClient() {
+    _diSub?.cancel();
+    _diSub = null;
+    _proxyClient = null;
+    _monitor?.clearProxyClient();
+    notifyListeners();
+  }
+
   @override
   void dispose() {
     _changeSub?.cancel();
