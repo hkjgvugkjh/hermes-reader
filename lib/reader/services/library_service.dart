@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'external_library_dir.dart';
+import 'library_cache_index.dart';
 
 import '../models/book.dart';
 import 'book_text_extractor.dart';
@@ -40,10 +41,11 @@ class TransportResponse {
 /// Request handed to the background isolate. Every field is sendable so the
 /// whole object can cross the isolate boundary.
 class _ExtractRequest {
-  const _ExtractRequest(this.sendPort, this.bytes, this.type);
+  const _ExtractRequest(this.sendPort, this.bytes, this.type, [this.encoding]);
   final SendPort sendPort;
   final Uint8List bytes;
   final FileType type;
+  final String? encoding;
 }
 
 /// Error returned from the background isolate. It carries a string (not the
@@ -57,7 +59,11 @@ class _ExtractError {
 /// touching the UI thread. Errors are stringified so they survive the trip back.
 Future<void> _extractIsolateEntry(_ExtractRequest req) async {
   try {
-    final text = await DefaultBookTextExtractor().extract(req.bytes, req.type);
+    final text = await DefaultBookTextExtractor().extract(
+      req.bytes,
+      req.type,
+      encoding: req.encoding,
+    );
     req.sendPort.send(text);
   } catch (e) {
     req.sendPort.send(_ExtractError('$e'));
@@ -70,13 +76,16 @@ Future<void> _extractIsolateEntry(_ExtractRequest req) async {
 /// app cannot be tricked into reading outside that directory.
 class LibraryService {
   final LibrarySandbox sandbox;
+  final LibraryCacheIndex _index;
 
   LibraryService({
     LibrarySandbox? sandbox,
     this.storage,
     FileBodyDecoder? bodyDecoder,
+    LibraryCacheIndex? index,
   })  : sandbox = sandbox ?? const LibrarySandbox(),
-        _bodyDecoder = bodyDecoder ?? const FileBodyDecoder();
+        _bodyDecoder = bodyDecoder ?? const FileBodyDecoder(),
+        _index = index ?? const LibraryCacheIndex();
 
   final FileTypeDetector _fileTypeDetector = const FileTypeDetector();
 
@@ -202,6 +211,15 @@ class LibraryService {
     // outside the try above so a disk error is not reported as a network error.
     await _storage.save(book, validated);
 
+    final cacheName = sandbox.localFileName(book.serverId, book.relativePath);
+    await _index.recordDownload(
+      cacheFileName: cacheName,
+      serverId: book.serverId,
+      relativePath: book.relativePath,
+      title: book.title,
+      sizeBytes: book.sizeBytes,
+    );
+
     return BookContent(
       bookId: book.id,
       text: text.text,
@@ -210,13 +228,23 @@ class LibraryService {
   }
 
   /// Reads a previously downloaded book from local storage, or null.
-  Future<BookContent?> readCached(Book book) async {
+  ///
+  /// [encoding] forces a specific codepage (e.g. 'gbk') to fix mojibake and is
+  /// persisted via [LibraryCacheIndex] so the choice survives restarts. When
+  /// null/absent, the index's stored encoding (default 'auto') is used.
+  ///
+  /// Text formats re-decode on every open so a charset fix applies immediately;
+  /// slow binary formats (PDF/EPUB) reuse the cached extraction.
+  Future<BookContent?> readCached(Book book, {String? encoding}) async {
     final type = _typeOf(book);
+    final cacheName = sandbox.localFileName(book.serverId, book.relativePath);
+    final enc = encoding ?? await _index.encodingOf(cacheName);
 
-    // Text formats decode cheaply and must be re-decoded whenever charset
-    // detection improves (e.g. a GBK book that was previously shown as
-    // mojibake). Slow binary formats (PDF/EPUB) keep using the cached
-    // extraction so they still open instantly.
+    if (encoding != null) {
+      // A manual pick always wins and is remembered.
+      await _index.setEncoding(cacheName, encoding);
+    }
+
     if (!_isTextual(type)) {
       final meta = await _storage.loadMeta(book);
       if (meta != null) {
@@ -234,7 +262,11 @@ class LibraryService {
 
     // Cached copies written by an older build may still carry the envelope.
     final bytes = _bodyDecoder.decode(raw, type: type);
-    final text = await _extractOffThread(bytes, type);
+    final text = await _extractOffThread(
+      bytes,
+      type,
+      encoding: enc == 'auto' ? null : enc,
+    );
     await _storage.saveMeta(book, text.text, text.breaks, text.images);
     return BookContent(
       bookId: book.id,
@@ -256,13 +288,17 @@ class LibraryService {
   /// Extracts readable text off the UI thread so large/garbled PDFs and EPUBs
   /// cannot freeze the app (they used to block the main isolate for up to a
   /// minute, triggering an Android "not responding" dialog).
-  Future<ExtractedText> _extractOffThread(List<int> bytes, FileType type) async {
+  Future<ExtractedText> _extractOffThread(
+    List<int> bytes,
+    FileType type, {
+    String? encoding,
+  }) async {
     final sw = Stopwatch()..start();
-    print('[EXTRACT] start bytes=${bytes.length} type=$type');
+    print('[EXTRACT] start bytes=${bytes.length} type=$type encoding=$encoding');
     final receivePort = ReceivePort();
     await Isolate.spawn(
       _extractIsolateEntry,
-      _ExtractRequest(receivePort.sendPort, Uint8List.fromList(bytes), type),
+      _ExtractRequest(receivePort.sendPort, Uint8List.fromList(bytes), type, encoding),
     );
     final response = await receivePort.first;
     if (response is _ExtractError) {

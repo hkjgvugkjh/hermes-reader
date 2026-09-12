@@ -125,6 +125,11 @@ class LibraryProvider extends ChangeNotifier {
     return download(transport: transport, book: book);
   }
 
+  /// Reads the locally cached copy of [book], optionally forcing a specific
+  /// [encoding] (e.g. 'gbk') so a manual charset fix is reapplied and persisted.
+  Future<BookContent?> readCached(Book book, {String? encoding}) =>
+      _service.readCached(book, encoding: encoding);
+
   Future<void> remove(Book book) async {
     await _service.deleteCached(book);
     _cached.remove(book.id);
