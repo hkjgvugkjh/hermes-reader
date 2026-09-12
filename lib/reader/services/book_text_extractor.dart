@@ -1,10 +1,9 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:gbk_codec/gbk_codec.dart';
-
 import '../models/book.dart';
 import 'epub_text_extractor.dart';
+import 'gbk_decoder.dart';
 import 'pdf_image_decoder.dart';
 import 'pdf_text_extractor.dart';
 
@@ -100,7 +99,7 @@ class DefaultBookTextExtractor implements BookTextExtractor {
     }
 
     try {
-      return gbk_bytes.decode(bytes);
+      return decodeGbk(bytes);
     } catch (_) {
       return String.fromCharCodes(bytes);
     }
@@ -114,7 +113,7 @@ class DefaultBookTextExtractor implements BookTextExtractor {
         return utf8.decode(bytes, allowMalformed: true);
       case 'gbk':
         try {
-          return gbk_bytes.decode(bytes);
+          return decodeGbk(bytes);
         } catch (_) {
           return String.fromCharCodes(bytes);
         }
