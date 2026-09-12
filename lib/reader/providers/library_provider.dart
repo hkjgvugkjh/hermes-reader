@@ -88,6 +88,7 @@ class LibraryProvider extends ChangeNotifier {
   Future<BookContent?> download({
     required FileTransport transport,
     required Book book,
+    String? encoding,
   }) async {
     if (_downloading.contains(book.id)) return null;
     _error = null;
@@ -99,6 +100,7 @@ class LibraryProvider extends ChangeNotifier {
       final content = await _service.downloadBook(
         transport: transport,
         book: book,
+        encoding: encoding,
       );
       _cached.add(book.id);
       _progress[book.id] = 1.0;
@@ -116,13 +118,18 @@ class LibraryProvider extends ChangeNotifier {
   }
 
   /// Opens a book, using the local copy when present.
+  ///
+  /// [encoding] forces a specific codepage (e.g. 'gbk') so a manual charset
+  /// fix is reapplied (and persisted) for either the cached or freshly
+  /// downloaded copy.
   Future<BookContent?> open({
     required FileTransport transport,
     required Book book,
+    String? encoding,
   }) async {
-    final cached = await _service.readCached(book);
+    final cached = await _service.readCached(book, encoding: encoding);
     if (cached != null) return cached;
-    return download(transport: transport, book: book);
+    return download(transport: transport, book: book, encoding: encoding);
   }
 
   /// Reads the locally cached copy of [book], optionally forcing a specific

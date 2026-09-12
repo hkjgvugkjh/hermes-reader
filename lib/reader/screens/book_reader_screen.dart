@@ -5,6 +5,9 @@ import '../models/book.dart';
 import '../models/reader_config.dart';
 import '../providers/library_provider.dart';
 import '../services/file_type_detector.dart';
+import '../services/library_cache_index.dart';
+import '../services/library_sandbox.dart';
+import '../services/library_service.dart';
 import '../services/pdf_image_decoder.dart';
 import '../services/tts_service.dart';
 
@@ -20,6 +23,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   bool _controlsVisible = true;
   bool _narrating = false;
   String? _fallbackNotice;
+  String? _encodingLabel;
 
   TtsService? _tts;
 
@@ -31,6 +35,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   static const FileTypeDetector _detector = FileTypeDetector();
 
+  static const Map<String, String> _encodingChoices = {
+    'auto': '自动',
+    'utf-8': 'UTF-8',
+    'gbk': 'GBK',
+  };
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -38,6 +48,56 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     if (tts != _tts) {
       _tts = tts;
       tts?.setProgressHandler(_onNarrationProgress);
+    }
+    _loadEncodingLabel();
+  }
+
+  /// Reflects the encoding persisted for the open book in the cache index.
+  Future<void> _loadEncodingLabel() async {
+    final book = context.read<ReaderProvider>().book;
+    if (book == null) return;
+    final name =
+        const LibrarySandbox().localFileName(book.serverId, book.relativePath);
+    final enc = await LibraryCacheIndex().encodingOf(name);
+    if (mounted) setState(() => _encodingLabel = enc);
+  }
+
+  Future<void> _switchEncoding(BuildContext context) async {
+    final reader = context.read<ReaderProvider>();
+    final book = reader.book;
+    if (book == null) return;
+    final current = _encodingLabel ?? 'auto';
+    final chosen = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('文本编码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final e in _encodingChoices.entries)
+              ListTile(
+                leading: current == e.key ? const Icon(Icons.check) : null,
+                title: Text(e.value),
+                subtitle: Text(e.key),
+                onTap: () => Navigator.pop(ctx, e.key),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null) return;
+    try {
+      final content =
+          await LibraryService().readCached(book, encoding: chosen);
+      if (content == null) {
+        _notice('无法重新解码，请返回文库列表切换');
+        return;
+      }
+      await reader.openBook(book, content);
+      if (mounted) setState(() => _encodingLabel = chosen);
+      _notice('已切换编码：${_encodingChoices[chosen] ?? chosen}');
+    } catch (e) {
+      _notice('切换编码失败：$e');
     }
   }
 
@@ -191,6 +251,13 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         PopupMenuItem(value: 1.2, child: Text('大')),
                         PopupMenuItem(value: 1.5, child: Text('特大')),
                       ],
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.translate),
+                      tooltip: _encodingLabel != null && _encodingLabel != 'auto'
+                          ? '文本编码：${_encodingLabel!.toUpperCase()}'
+                          : '文本编码',
+                      onPressed: () => _switchEncoding(context),
                     ),
                     IconButton(
                       icon: const Icon(Icons.tune),
