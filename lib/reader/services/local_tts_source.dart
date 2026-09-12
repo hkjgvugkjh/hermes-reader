@@ -16,6 +16,11 @@ class LocalTtsSource implements SpeechSource {
   final FlutterTts _tts;
   bool _initialized = false;
 
+  /// Set when [stop] interrupts an in-flight [speak]. flutter_tts resolves the
+  /// pending speak() promise with `0` on interruption, which would otherwise be
+  /// mis-reported as an engine failure.
+  bool _stopRequested = false;
+
   @override
   SpeechEngine get engine => SpeechEngine.local;
 
@@ -39,6 +44,10 @@ class LocalTtsSource implements SpeechSource {
   @override
   Future<void> speak(String text) async {
     await _ensureInit();
+    // Clear any stale flag left by an idle stop() so a genuine engine failure
+    // on this utterance is still reported.
+    _stopRequested = false;
+
     await _tts.stop();
 
     // Guard against an engine that never reports completion. Without this, a
@@ -55,11 +64,18 @@ class LocalTtsSource implements SpeechSource {
           },
         );
 
-    // flutter_tts returns 1 on success; anything else means the engine
-    // refused the utterance (common when no TTS data is installed).
+    // flutter_tts returns 1 on success. Anything else usually means the engine
+    // refused the utterance (e.g. no TTS data installed) — but an explicit
+    // stop() also makes the in-flight speak() resolve with 0. Treat that as a
+    // normal interruption so stopping narration does not raise an error.
     if (result != null && result is int && result != 1) {
+      if (_stopRequested) {
+        _stopRequested = false;
+        return;
+      }
       throw Exception('local TTS engine returned $result');
     }
+    _stopRequested = false;
   }
 
   /// Upper bound for one utterance. Generous: a full page of Chinese prose
@@ -67,7 +83,10 @@ class LocalTtsSource implements SpeechSource {
   static const _speakTimeout = Duration(minutes: 2);
 
   @override
-  Future<void> stop() => _tts.stop();
+  Future<void> stop() async {
+    _stopRequested = true; // mark the in-flight speak() as intentionally stopped
+    await _tts.stop();
+  }
 
   @override
   Future<void> setRate(double rate) async {
