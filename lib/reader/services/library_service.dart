@@ -202,13 +202,6 @@ class LibraryService {
     // outside the try above so a disk error is not reported as a network error.
     await _storage.save(book, validated);
 
-    // Mirror into the user-managed local library (production only; tests
-    // inject a fake storage, in which case nothing is written to disk).
-    // This is what makes a remote-shelf download show up in 本地文库.
-    if (storage == null) {
-      await _mirrorToLocalLibrary(book, validated);
-    }
-
     return BookContent(
       bookId: book.id,
       text: text.text,
@@ -344,32 +337,6 @@ class LibraryService {
   Future<bool> isCached(Book book) => _storage.exists(book);
 
   // ---- internals ----------------------------------------------------------
-
-  /// Copies a freshly downloaded remote book into the user-managed local
-  /// library (`<hermes-reader>/library/`) so it appears in 本地文库, not only
-  /// in the per-server download cache under `books/`. Best effort: any failure
-  /// is swallowed so a mirror problem never breaks the remote-shelf download.
-  Future<void> _mirrorToLocalLibrary(Book book, Uint8List bytes) async {
-    try {
-      final libDir = await ExternalLibraryDir.libraryDirectory();
-      final name = _basename(book.relativePath);
-      if (name.isEmpty) return;
-      final target = File('${libDir.path}/$name');
-      // A local file with the same name already exists — do not clobber it;
-      // the user already has a copy under that name.
-      if (await target.exists()) return;
-      await target.writeAsBytes(bytes, flush: true);
-    } catch (_) {
-      // Mirroring is best-effort.
-    }
-  }
-
-  static String _basename(String path) {
-    final clean =
-        path.endsWith('/') ? path.substring(0, path.length - 1) : path;
-    final i = clean.lastIndexOf('/');
-    return i < 0 ? clean : clean.substring(i + 1);
-  }
 
   static Map<String, dynamic> _decodeJson(Uint8List body) {
     try {
