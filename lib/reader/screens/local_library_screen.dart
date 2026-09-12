@@ -38,6 +38,7 @@ class LocalLibrarySection {
 class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
   late final Directory _rootDir;
   late final LocalLibraryProvider _provider;
+  bool _ready = false;
   bool _connecting = true;
   bool _reloading = false;
   String? _error;
@@ -68,6 +69,7 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
       forwardClient: LocalLibraryClient(widget.proxyClient.sendRequest),
     );
     if (!mounted) return;
+    setState(() => _ready = true);
     await _loadSections(firstLoad: true);
   }
 
@@ -393,20 +395,22 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
           ),
         ],
       ),
-      body: ListenableBuilder(
-        listenable: _provider,
-        builder: (context, _) {
-          if (_connecting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (_error != null) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(_error!, textAlign: TextAlign.center),
-              ),
-            );
-          }
+      body: !_ready
+          ? const Center(child: CircularProgressIndicator())
+          : ListenableBuilder(
+              listenable: _provider,
+              builder: (context, _) {
+                if (_connecting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (_error != null) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(_error!, textAlign: TextAlign.center),
+                    ),
+                  );
+                }
           final total = _sections.fold(0, (sum, s) => sum + s.books.length);
           if (total == 0) {
             return const Center(child: Text('文库为空，点击右上角上传文件'));
