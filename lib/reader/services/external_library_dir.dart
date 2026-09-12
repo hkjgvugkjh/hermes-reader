@@ -75,14 +75,6 @@ class ExternalLibraryDir {
     return dir;
   }
 
-  /// The user-managed local-library folder, created if necessary.
-  static Future<Directory> libraryDirectory() async {
-    final root = await rootDirectory();
-    final dir = Directory(p.join(root.path, 'library'));
-    if (!await dir.exists()) await dir.create(recursive: true);
-    return dir;
-  }
-
   /// Requests the storage permission required to write outside the app sandbox.
   ///
   /// On Android 11+ this is all-files access ([Permission.manageExternalStorage]);
