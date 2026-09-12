@@ -116,4 +116,16 @@ class LocalTtsSource implements SpeechSource {
   void setCompletionHandler(void Function() handler) {
     _tts.setCompletionHandler(handler);
   }
+
+  @override
+  void setProgressHandler(NarrationProgressHandler? handler) {
+    if (handler == null) {
+      // flutter_tts has no "clear handler"; an empty callback is equivalent.
+      _tts.setProgressHandler((String text, int start, int end, String word) {});
+      return;
+    }
+    _tts.setProgressHandler(
+      (String text, int start, int end, String word) => handler(end),
+    );
+  }
 }

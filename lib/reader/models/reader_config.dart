@@ -1,8 +1,15 @@
-/// Configuration for the hermes-reader feature.
-///
-/// Privacy-relevant limits live here so they are visible in one place rather
-/// than scattered through the services.
-library;
+/// How the reading area is divided for tap navigation.
+enum TapZoneMode {
+  /// Left third = back, middle = toggle controls, right third = forward.
+  thirds('左中右三区'),
+  /// Left half = back, right half = forward.
+  halves('左右两区'),
+  /// Only edges respond; center toggles controls.
+  edges('仅边缘区域');
+
+  const TapZoneMode(this.label);
+  final String label;
+}
 
 /// Which engine produces the audio when reading aloud.
 enum TtsMode {
@@ -37,7 +44,9 @@ class ReaderConfig {
   static const int maxListDepth = 3;
 
   /// Extensions we are willing to open.
-  static const List<String> allowedExtensions = ['.txt', '.md'];
+  static const List<String> allowedExtensions = [
+    '.txt', '.md', '.pdf', '.epub', '.mobi', '.html', '.htm', '.json'
+  ];
 
   // ---- behaviour ----------------------------------------------------------
 
@@ -62,6 +71,12 @@ class ReaderConfig {
   /// Automatically advance to the next page when narration finishes.
   final bool autoTurnPage;
 
+  /// How the reading area is divided for tap navigation.
+  final TapZoneMode tapZoneMode;
+
+  /// When true, left zone goes forward (next page); when false, goes back.
+  final bool leftZoneForward;
+
   const ReaderConfig({
     this.ttsMode = TtsMode.auto,
     this.monitorInterval = const Duration(seconds: 60),
@@ -70,6 +85,8 @@ class ReaderConfig {
     this.charsPerPage = 700,
     this.fontScale = 1.0,
     this.autoTurnPage = true,
+    this.tapZoneMode = TapZoneMode.thirds,
+    this.leftZoneForward = false,
   }) : assert(charsPerPage > 0, 'charsPerPage must be positive');
 
   ReaderConfig copyWith({
@@ -80,6 +97,8 @@ class ReaderConfig {
     int? charsPerPage,
     double? fontScale,
     bool? autoTurnPage,
+    TapZoneMode? tapZoneMode,
+    bool? leftZoneForward,
   }) =>
       ReaderConfig(
         ttsMode: ttsMode ?? this.ttsMode,
@@ -89,6 +108,8 @@ class ReaderConfig {
         charsPerPage: charsPerPage ?? this.charsPerPage,
         fontScale: fontScale ?? this.fontScale,
         autoTurnPage: autoTurnPage ?? this.autoTurnPage,
+        tapZoneMode: tapZoneMode ?? this.tapZoneMode,
+        leftZoneForward: leftZoneForward ?? this.leftZoneForward,
       );
 
   Map<String, dynamic> toJson() => {
@@ -99,6 +120,8 @@ class ReaderConfig {
         'charsPerPage': charsPerPage,
         'fontScale': fontScale,
         'autoTurnPage': autoTurnPage,
+        'tapZoneMode': tapZoneMode.name,
+        'leftZoneForward': leftZoneForward,
       };
 
   factory ReaderConfig.fromJson(Map<String, dynamic> json) => ReaderConfig(
@@ -114,5 +137,10 @@ class ReaderConfig {
         charsPerPage: json['charsPerPage'] as int? ?? 700,
         fontScale: (json['fontScale'] as num? ?? 1.0).toDouble(),
         autoTurnPage: json['autoTurnPage'] as bool? ?? true,
+        tapZoneMode: TapZoneMode.values.firstWhere(
+          (e) => e.name == json['tapZoneMode'],
+          orElse: () => TapZoneMode.thirds,
+        ),
+        leftZoneForward: json['leftZoneForward'] as bool? ?? false,
       );
 }

@@ -1,0 +1,145 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import '../models/book.dart';
+import 'epub_text_extractor.dart';
+import 'pdf_image_decoder.dart';
+import 'pdf_text_extractor.dart';
+
+/// Text plus the offsets where logical pages (PDF pages, EPUB chapters) start.
+///
+/// Offsets let the paginator keep one PDF page per reader page instead of
+/// re-flowing the text by character count.
+class ExtractedText {
+  const ExtractedText(
+    this.text, {
+    this.breaks = const [],
+    this.images = const [],
+  });
+
+  final String text;
+
+  /// Character offsets into [text], ascending, one per logical page.
+  final List<int> breaks;
+
+  /// Images pulled from the source (currently only PDF), referenced inline by
+  /// [imageMarker] tokens embedded in [text]. Empty for text-only formats.
+  final List<PdfImage> images;
+}
+
+/// Turns raw book bytes into readable text, whatever the container format.
+abstract class BookTextExtractor {
+  Future<ExtractedText> extract(Uint8List bytes, FileType type);
+}
+
+/// Dispatches on [FileType] and normalises the result.
+///
+/// Binary formats (PDF / EPUB) delegate to dedicated extractors; the rest are
+/// handled inline because they are cheap.
+class DefaultBookTextExtractor implements BookTextExtractor {
+  const DefaultBookTextExtractor({PdfTextExtractor? pdf, EpubTextExtractor? epub})
+      : _pdf = pdf ?? const PdfTextExtractor(),
+        _epub = epub ?? const EpubTextExtractor();
+
+  final PdfTextExtractor _pdf;
+  final EpubTextExtractor _epub;
+
+  @override
+  Future<ExtractedText> extract(Uint8List bytes, FileType type) async {
+    switch (type) {
+      case FileType.plainText:
+        return ExtractedText(decodeText(bytes));
+      case FileType.html:
+      case FileType.mobi:
+        // MOBI wraps HTML, so the same tag stripping applies; whatever is left
+        // that is not printable is dropped rather than shown as mojibake.
+        return ExtractedText(cleanText(stripHtml(decodeText(bytes))));
+      case FileType.json:
+        return ExtractedText(prettyJson(decodeText(bytes)));
+      case FileType.pdf:
+        return _pdf.extract(bytes);
+      case FileType.epub:
+        return _epub.extract(bytes);
+      case FileType.unknown:
+        return ExtractedText(decodeText(bytes));
+    }
+  }
+
+  /// Decodes bytes as UTF-8, falling back to latin-1.
+  ///
+  /// GBK-encoded Chinese books cannot be recovered without a codepage table;
+  /// we surface the raw bytes instead of throwing so the user still sees text.
+  static String decodeText(Uint8List bytes) {
+    try {
+      return utf8.decode(bytes);
+    } catch (_) {
+      return String.fromCharCodes(bytes);
+    }
+  }
+
+  /// Removes HTML tags and decodes the entities that actually show up in books.
+  static String stripHtml(String input) {
+    var text = input;
+
+    // Drop whole blocks whose content is never prose.
+    text = text.replaceAll(
+        RegExp(r'<(script|style|head)[^>]*>.*?</\1>',
+            caseSensitive: false, dotAll: true),
+        ' ');
+
+    // Block-level closers become paragraph breaks, <br> a single newline.
+    text = text.replaceAllMapped(
+        RegExp(r'<br\s*/?>', caseSensitive: false), (_) => '\n');
+    text = text.replaceAllMapped(
+        RegExp(r'</(p|div|h[1-6]|li|tr|blockquote|section|article)>',
+            caseSensitive: false),
+        (_) => '\n\n');
+
+    text = text.replaceAll(RegExp(r'<[^>]*>', dotAll: true), ' ');
+    return decodeEntities(text);
+  }
+
+  /// Collapses whitespace and drops control characters that survived decoding.
+  static String cleanText(String input) {
+    final text = input.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final cleaned = text.replaceAllMapped(
+      RegExp(r'[^\S\n]+'),
+      (_) => ' ',
+    );
+    return cleaned
+        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+        .split('\n')
+        .map((line) => line.trim())
+        .join('\n')
+        .trim();
+  }
+
+  /// Re-indents JSON so it reads as text rather than one long line.
+  static String prettyJson(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      return JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  static String decodeEntities(String input) {
+    return input
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&apos;', "'")
+        .replaceAll('&#39;', "'")
+        .replaceAll('&mdash;', '—')
+        .replaceAll('&ndash;', '–')
+        .replaceAll('&hellip;', '…')
+        .replaceAllMapped(RegExp(r'&#(\d+);'), (m) {
+      final code = int.tryParse(m.group(1) ?? '');
+      if (code == null) return m.group(0)!;
+      return String.fromCharCode(code);
+    });
+  }
+}

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart' as cryptography;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -71,21 +72,110 @@ class ProxyClient {
   }
 
   /// Connect to the proxy server and perform X25519 key exchange.
-  Future<void> connect() async {
-    if (_connected) return;
+  ///
+  /// Safe to call concurrently: callers that arrive while a handshake is in
+  /// flight await that same handshake instead of starting a second one. Without
+  /// this, two overlapping calls could each open a socket, and the loser would
+  /// wait out its full timeout on a channel nothing feeds.
+  Future<void> connect() {
+    if (_connected) return Future<void>.value();
 
+    // Join the in-flight handshake rather than starting another.
+    final pending = _connecting;
+    if (pending != null) return pending;
+
+    // The handle is a plain completer future: everyone who joins — including
+    // latecomers arriving after a failure — observes the same outcome, and the
+    // single error handler below keeps a rejection from going unhandled.
+    final completer = Completer<void>();
+    final shared = completer.future;
+    _connecting = shared;
+
+    (handshakeOverride ?? _connectOnce)()
+        .then((_) {
+      if (!completer.isCompleted) completer.complete();
+    }).catchError((Object e, StackTrace st) {
+      if (!completer.isCompleted) completer.completeError(e, st);
+    }).whenComplete(() {
+      // Cleared once settled so the next call starts a fresh attempt.
+      if (identical(_connecting, shared)) _connecting = null;
+    });
+
+    return shared;
+  }
+
+  /// The handshake every concurrent [connect] caller is currently awaiting.
+  Future<void>? _connecting;
+
+  /// Builds the WebSocket URL for [proxyUrl].
+  ///
+  /// Three things the naive string concatenation got wrong:
+  ///  * `Uri.hasPort` is true for schemes with a default port, and `uri.port`
+  ///    then reports 0 — which produced `https://host:0/ws`, a URL that cannot
+  ///    be dialled.
+  ///  * a token already present in [proxyUrl] was appended to rather than
+  ///    replaced, yielding `?token=a?token=b`.
+  ///  * `http`/`https` are not WebSocket schemes.
+  @visibleForTesting
+  Uri buildUri() => _buildUri();
+
+  Uri _buildUri() {
+    final uri = Uri.parse(proxyUrl);
+
+    // Normalise to a WebSocket scheme; honour ws/wss as given.
+    final scheme = switch (uri.scheme) {
+      'https' || 'wss' => 'wss',
+      _ => 'ws',
+    };
+
+    // Only carry the port when the user named a non-default one.
+    final defaultPort = scheme == 'wss' ? 443 : 80;
+    final hasCustomPort = uri.hasPort && uri.port != 0 && uri.port != defaultPort;
+
+    final query = <String, String>{...uri.queryParameters};
+    if (authToken != null && authToken!.isNotEmpty) {
+      query['token'] = authToken!;
+    }
+
+    return Uri(
+      scheme: scheme,
+      host: uri.host,
+      port: hasCustomPort ? uri.port : null,
+      path: uri.path.isEmpty ? wsPath : uri.path,
+      queryParameters: query.isEmpty ? null : query,
+    );
+  }
+
+  /// Replaced by tests to drive the handshake without a real socket. The
+  /// concurrency guard in [connect] is the part under test, not the socket.
+  @visibleForTesting
+  Future<void> Function()? handshakeOverride;
+
+  /// Seam for tests: marks the client ready without a real socket.
+  @visibleForTesting
+  void markConnectedForTest() {
+    _connected = true;
+    if (!_connectedCompleter.isCompleted) _connectedCompleter.complete();
+  }
+
+  Future<void> _connectOnce() async {
     // Cancel any existing subscription to prevent "Stream already listened" error
     if (_subscription != null) {
       await _subscription!.cancel();
       _subscription = null;
     }
 
+    // A fresh handshake invalidates previous state: the old channel is gone and
+    // any *already completed* completer belongs to a dead connection. A pending
+    // one is left alone — waiters on it are still waiting for this handshake.
+    _connected = false;
+    _sharedKey = null;
+    if (_connectedCompleter.isCompleted) {
+      _connectedCompleter = Completer<void>();
+    }
+
     try {
-      // Build URL with token for Nginx auth
-      final uri = Uri.parse(proxyUrl);
-      final tokenQuery = (authToken?.isNotEmpty == true) ? '?token=$authToken' : '';
-      final url = '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}${uri.path}$tokenQuery';
-      final parsedUri = Uri.parse(url);
+      final parsedUri = _buildUri();
       _channel = WebSocketChannel.connect(parsedUri);
 
       // Generate X25519 key pair
@@ -154,12 +244,14 @@ class ProxyClient {
         },
         onError: (e) {
           _connected = false;
+          _recreateConnectedCompleter();
           if (!handshakeCompleter.isCompleted) {
             handshakeCompleter.completeError(e);
           }
         },
         onDone: () {
           _connected = false;
+          _recreateConnectedCompleter();
           if (!handshakeCompleter.isCompleted) {
             handshakeCompleter.completeError(ConnectionClosedException('Connection closed during handshake'));
           }
@@ -170,11 +262,22 @@ class ProxyClient {
       await handshakeCompleter.future.timeout(timeout);
     } catch (e) {
       _connected = false;
+      _recreateConnectedCompleter();
+      // Drop the dead channel so the next attempt starts clean.
+      _channel = null;
       throw Exception('WebSocket connection failed: $e');
     }
   }
 
-  final _connectedCompleter = Completer<void>();
+  Completer<void> _connectedCompleter = Completer<void>();
+
+  /// A completer can only complete once, so a reconnect needs a fresh one —
+  /// otherwise `await whenConnected` would resolve against a dead connection.
+  void _recreateConnectedCompleter() {
+    if (!_connectedCompleter.isCompleted) return;
+    _connectedCompleter = Completer<void>();
+  }
+
   Future<void> get whenConnected => _connectedCompleter.future;
   final _sessionUpdateCompleters = <String, Completer<Map<String, dynamic>>>{};
 
@@ -337,6 +440,8 @@ class ProxyClient {
   /// Disconnect from the proxy.
   void disconnect() {
     _connected = false;
+    _sharedKey = null;
+    _recreateConnectedCompleter();
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;

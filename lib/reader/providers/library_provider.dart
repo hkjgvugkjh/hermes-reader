@@ -2,6 +2,11 @@ import 'package:flutter/foundation.dart';
 
 import '../models/book.dart';
 import '../models/reader_config.dart';
+import '../services/pdf_image_decoder.dart';
+import '../services/narration_progress_service.dart';
+import '../services/paginator_service.dart';
+import '../services/reader_config_storage.dart';
+import '../services/reading_progress_service.dart';
 import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
 
@@ -74,12 +79,19 @@ class LibraryProvider extends ChangeNotifier {
     }
   }
 
+  /// Books currently being downloaded, by id. Lets the UI show a spinner and
+  /// block re-entrant taps while a download is in flight.
+  final Set<String> _downloading = {};
+  bool isDownloading(String bookId) => _downloading.contains(bookId);
+
   /// Downloads a book and returns its content, or null on failure.
   Future<BookContent?> download({
     required FileTransport transport,
     required Book book,
   }) async {
+    if (_downloading.contains(book.id)) return null;
     _error = null;
+    _downloading.add(book.id);
     _progress[book.id] = 0.0;
     notifyListeners();
 
@@ -97,6 +109,9 @@ class LibraryProvider extends ChangeNotifier {
       _progress.remove(book.id);
       notifyListeners();
       return null;
+    } finally {
+      _downloading.remove(book.id);
+      notifyListeners();
     }
   }
 
@@ -127,8 +142,15 @@ class ReaderProvider extends ChangeNotifier {
   ReaderProvider({
     ReaderConfig? config,
     PaginatorLike? paginator,
+    ReadingProgressService? progressService,
+    NarrationProgressService? narrationProgressService,
+    ReaderConfigStorage? configStorage,
   })  : _config = config ?? const ReaderConfig(),
-        _paginator = paginator;
+        _paginator = paginator,
+        _progressService = progressService ?? ReadingProgressService(),
+        _narrationProgress =
+            narrationProgressService ?? NarrationProgressService(),
+        _configStorage = configStorage;
 
   ReaderConfig _config;
   ReaderConfig get config => _config;
@@ -146,21 +168,31 @@ class ReaderProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Persists settings when a storage was injected; optional so tests can run
+  /// without platform channels.
+  final ReaderConfigStorage? _configStorage;
+
   void updateConfig(ReaderConfig config) {
     _config = config;
     // Re-paginate only when the page size actually changed — re-paginating on
     // an unrelated setting would jump the reader back to page 0.
-    if (_text != null && config.charsPerPage != _lastPageChars) {
+    if (_content != null && config.charsPerPage != _lastPageChars) {
       _rebuildPages();
     }
     notifyListeners();
+    _configStorage?.save(config);
   }
 
-  String? _text;
+  /// The open book's content, kept whole so page breaks survive re-pagination.
+  BookContent? _content;
   int _lastPageChars = 700;
 
   final List<BookPage> _pages = [];
   List<BookPage> get pages => List.unmodifiable(_pages);
+
+  /// Images pulled from the source, indexed by the [imageMarker] tokens embedded
+  /// in each [BookPage.content].
+  List<PdfImage> get images => _content?.images ?? const [];
 
   int _pageIndex = 0;
   int get pageIndex => _pageIndex;
@@ -176,21 +208,83 @@ class ReaderProvider extends ChangeNotifier {
   double get progress =>
       _pages.isEmpty ? 0.0 : (_pageIndex / (_pages.length - 1)).clamp(0.0, 1.0);
 
-  /// Opens [content] for [book].
-  void openBook(Book book, BookContent content) {
+  final ReadingProgressService _progressService;
+  final NarrationProgressService _narrationProgress;
+
+  /// Saved reading position for [bookId], used by the shelf to offer
+  /// "continue" instead of a blind restart.
+  Future<ReadingProgress?> loadProgress(String bookId) =>
+      _progressService.load(bookId);
+
+  /// Where narration stopped, or null when the book has never been read aloud.
+  Future<NarrationProgress?> loadNarration(String bookId) =>
+      _narrationProgress.load(bookId);
+
+  /// Records the spoken position so the next session can resume.
+  Future<void> saveNarration({required int pageIndex, required int charOffset}) {
+    final book = _book;
+    if (book == null) return Future<void>.value();
+    return _narrationProgress.save(
+      NarrationProgress(
+        bookId: book.id,
+        pageIndex: pageIndex,
+        charOffset: charOffset,
+        updatedAt: DateTime.now(),
+      ),
+    );
+  }
+
+  /// Clears the spoken position once a book has been read to the end.
+  Future<void> clearNarration() {
+    final book = _book;
+    if (book == null) return Future<void>.value();
+    return _narrationProgress.clear(book.id);
+  }
+
+  /// Opens [content] for [book], restoring saved position when available.
+  Future<void> openBook(Book book, BookContent content) async {
     _book = book;
-    _text = content.text;
+    _content = content;
     _error = null;
-    _pageIndex = 0;
     _rebuildPages();
+
+    // Try to restore saved reading position
+    final saved = await _progressService.load(book.id);
+    if (saved != null && saved.pageIndex < _pages.length) {
+      _pageIndex = saved.pageIndex;
+    } else {
+      _pageIndex = 0;
+    }
     notifyListeners();
   }
 
+  /// Saves the current reading position before navigating away.
+  Future<void> savePosition() async {
+    final book = _book;
+    if (book == null || _pages.isEmpty) return;
+    final progress = ReadingProgress(
+      bookId: book.id,
+      pageIndex: _pageIndex,
+      percent: this.progress,
+      updatedAt: DateTime.now(),
+    );
+    await _progressService.save(progress);
+  }
+
   void _rebuildPages() {
-    if (_text == null) return;
+    final content = _content;
+    if (content == null) return;
     _lastPageChars = _config.charsPerPage;
-    final pages = _paginator?.paginate(_text!, _config.charsPerPage) ??
-        defaultPaginate(_text!, _config.charsPerPage);
+    final pages = _paginator?.paginate(
+          content.text,
+          _config.charsPerPage,
+          breakOffsets: content.pageBreaks,
+        ) ??
+        defaultPaginate(
+          content.text,
+          _config.charsPerPage,
+          breakOffsets: content.pageBreaks,
+        );
     _pages
       ..clear()
       ..addAll(pages);
@@ -219,9 +313,54 @@ class ReaderProvider extends ChangeNotifier {
     return true;
   }
 
+  /// Handle tap on a horizontal position [fraction] (0.0 - 1.0) within the
+  /// reading area, using the configured [TapZoneMode].
+  void handleTap(double fraction) {
+    switch (_config.tapZoneMode) {
+      case TapZoneMode.thirds:
+        if (fraction < 0.333) {
+          _config.leftZoneForward ? nextPage() : previousPage();
+        } else if (fraction > 0.667) {
+          _config.leftZoneForward ? previousPage() : nextPage();
+        } else {
+          // Center toggles controls — handled by parent
+        }
+        break;
+      case TapZoneMode.halves:
+        if (_config.leftZoneForward) {
+          if (fraction < 0.5) nextPage();
+          else previousPage();
+        } else {
+          if (fraction < 0.5) previousPage();
+          else nextPage();
+        }
+        break;
+      case TapZoneMode.edges:
+        if (fraction < 0.1) {
+          _config.leftZoneForward ? nextPage() : previousPage();
+        } else if (fraction > 0.9) {
+          _config.leftZoneForward ? previousPage() : nextPage();
+        }
+        // Center area (0.1-0.9) toggles controls
+        break;
+    }
+  }
+
+  /// Returns true when tapping [fraction] should toggle controls (not navigate).
+  bool isToggleZone(double fraction) {
+    switch (_config.tapZoneMode) {
+      case TapZoneMode.thirds:
+        return fraction >= 0.333 && fraction <= 0.667;
+      case TapZoneMode.halves:
+        return false; // halves mode: always navigate
+      case TapZoneMode.edges:
+        return fraction >= 0.1 && fraction <= 0.9;
+    }
+  }
+
   void close() {
     _book = null;
-    _text = null;
+    _content = null;
     _pages.clear();
     _pageIndex = 0;
     notifyListeners();
@@ -231,19 +370,17 @@ class ReaderProvider extends ChangeNotifier {
 /// Minimal pagination seam so the provider can be tested without the real
 /// (fairly involved) paginator implementation.
 abstract class PaginatorLike {
-  List<BookPage> paginate(String text, int charsPerPage);
+  List<BookPage> paginate(String text, int charsPerPage,
+      {List<int>? breakOffsets});
 }
 
-List<BookPage> defaultPaginate(String text, int charsPerPage) {
-  final pages = <BookPage>[];
-  for (var i = 0; i < text.length; i += charsPerPage) {
-    final end =
-        (i + charsPerPage > text.length) ? text.length : i + charsPerPage;
-    pages.add(BookPage(
-      index: pages.length,
-      content: text.substring(i, end),
-      startOffset: i,
-    ));
-  }
-  return pages;
+/// Default pagination: one page per PDF page / EPUB chapter when the source
+/// supplies breaks, otherwise flow by character count.
+List<BookPage> defaultPaginate(
+  String text,
+  int charsPerPage, {
+  List<int>? breakOffsets,
+}) {
+  return PaginatorService()
+      .paginate(text, charsPerPage: charsPerPage, breakOffsets: breakOffsets);
 }

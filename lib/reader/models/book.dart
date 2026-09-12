@@ -1,6 +1,20 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import '../services/pdf_image_decoder.dart';
+
+/// Format of a book file. Used to decide how to parse and whether narration
+/// is available for it.
+enum FileType {
+  unknown,
+  plainText,
+  pdf,
+  epub,
+  mobi,
+  html,
+  json,
+}
+
 /// A book available on one of the connected servers.
 class Book {
   /// Stable id: `serverId::relativePath`.
@@ -18,6 +32,9 @@ class Book {
 
   final DateTime? modifiedAt;
 
+  /// Detected file format. Null for legacy books without stored type.
+  final FileType? fileType;
+
   const Book({
     required this.id,
     required this.serverId,
@@ -27,6 +44,7 @@ class Book {
     required this.sizeBytes,
     this.downloaded = false,
     this.modifiedAt,
+    this.fileType,
   });
 
   Book copyWith({
@@ -38,6 +56,7 @@ class Book {
     int? sizeBytes,
     bool? downloaded,
     DateTime? modifiedAt,
+    FileType? fileType,
   }) =>
       Book(
         id: id ?? this.id,
@@ -48,6 +67,7 @@ class Book {
         sizeBytes: sizeBytes ?? this.sizeBytes,
         downloaded: downloaded ?? this.downloaded,
         modifiedAt: modifiedAt ?? this.modifiedAt,
+        fileType: fileType ?? this.fileType,
       );
 
   /// Human-readable size.
@@ -68,6 +88,7 @@ class Book {
         'sizeBytes': sizeBytes,
         'downloaded': downloaded,
         'modifiedAt': modifiedAt?.toIso8601String(),
+        'fileType': fileType?.name,
       };
 
   factory Book.fromJson(Map<String, dynamic> json) => Book(
@@ -80,6 +101,12 @@ class Book {
         downloaded: json['downloaded'] as bool? ?? false,
         modifiedAt: json['modifiedAt'] != null
             ? DateTime.tryParse(json['modifiedAt'] as String)
+            : null,
+        fileType: json['fileType'] != null
+            ? FileType.values.firstWhere(
+                (e) => e.name == json['fileType'],
+                orElse: () => FileType.unknown,
+              )
             : null,
       );
 }
@@ -139,11 +166,39 @@ class BookContent {
   final String text;
   final String encoding;
 
+  /// Character offsets where logical pages start (PDF pages, EPUB chapters).
+  ///
+  /// Empty for plain text, where the paginator is free to flow by length.
+  final List<int> pageBreaks;
+
+  /// Images pulled from the source (PDF), referenced inline by [imageMarker]
+  /// tokens in [text]. Empty for text-only formats.
+  final List<PdfImage> images;
+
   const BookContent({
     required this.bookId,
     required this.text,
     this.encoding = 'utf-8',
+    this.pageBreaks = const [],
+    this.images = const [],
   });
+
+  /// True when the source carried its own page boundaries.
+  bool get hasPageBreaks => pageBreaks.isNotEmpty;
+
+  /// A copy with replaced fields (used when re-paginating).
+  BookContent copyWith({
+    String? text,
+    List<int>? pageBreaks,
+    List<PdfImage>? images,
+  }) =>
+      BookContent(
+        bookId: bookId,
+        text: text ?? this.text,
+        encoding: encoding,
+        pageBreaks: pageBreaks ?? this.pageBreaks,
+        images: images ?? this.images,
+      );
 
   int get length => text.length;
 
@@ -151,4 +206,37 @@ class BookContent {
   int get byteLength => utf8.encode(text).length;
 
   Uint8List get bytes => Uint8List.fromList(utf8.encode(text));
+}
+
+/// Where narration stopped inside a book, so it can be resumed later.
+class NarrationProgress {
+  final String bookId;
+  final int pageIndex;
+
+  /// Characters into the page that had already been spoken.
+  final int charOffset;
+  final DateTime updatedAt;
+
+  const NarrationProgress({
+    required this.bookId,
+    required this.pageIndex,
+    required this.charOffset,
+    required this.updatedAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'bookId': bookId,
+        'pageIndex': pageIndex,
+        'charOffset': charOffset,
+        'updatedAt': updatedAt.toIso8601String(),
+      };
+
+  factory NarrationProgress.fromJson(Map<String, dynamic> json) =>
+      NarrationProgress(
+        bookId: json['bookId'] as String,
+        pageIndex: json['pageIndex'] as int? ?? 0,
+        charOffset: json['charOffset'] as int? ?? 0,
+        updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+            DateTime.now(),
+      );
 }

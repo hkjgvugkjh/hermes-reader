@@ -11,6 +11,7 @@ import 'reader/providers/task_provider.dart';
 import 'reader/providers/global_config_provider.dart';
 import 'reader/providers/server_provider.dart';
 import 'reader/services/library_service.dart';
+import 'reader/services/reader_config_storage.dart';
 import 'reader/services/tts_service.dart';
 import 'reader/services/local_tts_source.dart';
 import 'reader/services/server_tts_source.dart';
@@ -23,6 +24,7 @@ import 'reader/models/global_config.dart';
 import 'reader/services/direct_file_transport.dart';
 import 'reader/services/proxy_file_transport.dart';
 import 'reader/services/proxy_client.dart' as reader_proxy;
+import 'reader/screens/local_library_screen.dart';
 import 'reader/models/hive_models.dart';
 
 void main() {
@@ -45,7 +47,11 @@ class HermesReaderApp extends StatelessWidget {
           update: (context, service, previous) =>
               previous ?? LibraryProvider(service),
         ),
-        ChangeNotifierProvider(create: (_) => ReaderProvider()),
+        ChangeNotifierProvider(
+          create: (_) => ReaderProvider(
+            configStorage: ReaderConfigStorage(),
+          ),
+        ),
         ChangeNotifierProvider(create: (_) => SessionProvider()),
         ChangeNotifierProvider(create: (_) => TaskProvider()),
         ChangeNotifierProvider(create: (_) => GlobalConfigProvider()),
@@ -115,7 +121,19 @@ class _StartupScreenState extends State<StartupScreen> {
     _checkConfig();
   }
 
+  /// Restores the saved reader settings before the first page is shown.
+  Future<void> _restoreReaderConfig() async {
+    try {
+      final config = await ReaderConfigStorage().load();
+      if (!mounted) return;
+      context.read<ReaderProvider>().updateConfig(config);
+    } catch (e) {
+      debugPrint('reader config restore failed: $e');
+    }
+  }
+
   Future<void> _checkConfig() async {
+    await _restoreReaderConfig();
     _addCheck('读取本地配置');
     try {
       final globalConfig = context.read<GlobalConfigProvider>();
@@ -937,6 +955,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   authToken: globalConfig.config.proxyAuthToken,
                 ),
             serverId: server.id,
+            username: server.username,
+            password: server.password,
+            profile: server.profile,
           )
         : DirectFileTransport(server: server);
     
@@ -948,6 +969,27 @@ class _HomeScreenState extends State<HomeScreen> {
           serverName: server.name,
           transport: transport,
         ),
+      ),
+    );
+  }
+
+  Future<void> _openLocalLibrary() async {
+    final globalConfig = context.read<GlobalConfigProvider>();
+    if (!globalConfig.isProxyMode) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('本地文库需要代理模式')),
+      );
+      return;
+    }
+    final proxyClient = reader_proxy.ProxyClient(
+      proxyUrl: globalConfig.config.proxyWsUrl,
+      authToken: globalConfig.config.proxyAuthToken,
+    );
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LocalLibraryScreen(proxyClient: proxyClient),
       ),
     );
   }
@@ -988,16 +1030,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _switchToProxyMode() async {
-    final globalConfig = context.read<GlobalConfigProvider>();
-    if (globalConfig.config.proxyUrl.isEmpty) {
-      _showManualConfigDialog();
-    } else {
-      // Already has proxy config, just trigger reconnect
-      final sessionProvider = context.read<SessionProvider>();
-      sessionProvider.clearProxyClient();
-      if (mounted) setState(() => _currentMode = AppMode.online);
-      _autoConnect();
-    }
+    // Always show proxy configuration dialog so user can review settings
+    _showManualConfigDialog();
   }
 
   Future<void> _switchToStandaloneMode() async {
@@ -1082,6 +1116,15 @@ class _HomeScreenState extends State<HomeScreen> {
                 onTap: () {
                   Navigator.pop(ctx);
                   _openEbook();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.folder_special),
+                title: const Text('本地文库'),
+                subtitle: const Text('统一管理各服务器下载的文件，可上传/转发'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _openLocalLibrary();
                 },
               ),
             ],
@@ -1892,6 +1935,9 @@ class _UnavailableServerTts implements SpeechSource {
 
   @override
   Future<void> stop() async {}
+
+  @override
+  void setProgressHandler(NarrationProgressHandler? handler) {}
 
   @override
   Future<void> setRate(double rate) async {}

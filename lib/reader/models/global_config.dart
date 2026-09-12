@@ -22,7 +22,7 @@ class GlobalConfig {
   
   GlobalConfig({
     this.mode = ConnectionMode.standalone,
-    this.proxyUrl = '',
+    this.proxyUrl = 'https://hermes-proxy.willam.eu.org',
     this.proxyAuthToken = '',
     this.proxyWsPort = 8649,
     this.proxyAdminPort = 8650,

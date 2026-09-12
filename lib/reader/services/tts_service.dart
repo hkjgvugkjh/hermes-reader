@@ -33,6 +33,10 @@ class SpeakResult {
   });
 }
 
+/// Reports how far into the current utterance the engine has got, as a
+/// character offset. Used to resume narration from where it stopped.
+typedef NarrationProgressHandler = void Function(int charOffset);
+
 /// Produces audio for a chunk of text.
 ///
 /// Implementations are separated so the reader UI does not care whether audio
@@ -47,6 +51,9 @@ abstract class SpeechSource {
   Future<void> stop();
   Future<void> setRate(double rate);
   Future<void> dispose();
+
+  /// Optional: only engines that expose word-level progress implement this.
+  void setProgressHandler(NarrationProgressHandler? handler) {}
 }
 
 /// Chooses between the server and on-device engines.
@@ -84,6 +91,21 @@ class TtsService {
   /// Emits as narration starts and stops, so the reader can drive page turns.
   Stream<TtsState> get stateStream => _stateController.stream;
 
+  /// Where the current utterance has got to. Only the local engine reports it.
+  void setProgressHandler(NarrationProgressHandler? handler) {
+    _local.setProgressHandler(handler == null
+        ? null
+        : (offset) {
+            _lastCharOffset = offset;
+            handler(offset);
+          });
+  }
+
+  int _lastCharOffset = 0;
+
+  /// Last reported character offset, or 0 when the engine never reported one.
+  int get lastCharOffset => _lastCharOffset;
+
   TtsState _state = TtsState.idle;
   TtsState get state => _state;
 
@@ -114,6 +136,7 @@ class TtsService {
       return const SpeakResult(engine: SpeechEngine.local);
     }
 
+    _lastCharOffset = 0;
     _emit(TtsState.speaking);
 
     switch (_mode) {
@@ -184,8 +207,14 @@ class TtsService {
   }
 
   Future<void> stop() async {
-    await _server.stop();
-    await _local.stop();
+    try {
+      await _server.stop();
+    } catch (_) {
+      // Stopping an already-stopped engine must not propagate.
+    }
+    try {
+      await _local.stop();
+    } catch (_) {}
     _emit(TtsState.idle);
   }
 

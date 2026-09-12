@@ -23,10 +23,13 @@ dependencies:
   flutter_tts: ^4.2.5
   record: ^7.1.1
   flutter_local_notifications: ^17.2.4
+  pdf: ^3.10.4
+  file_picker: ^8.1.0
 
   # shared code
   hermes_shared:
     path: ../hermes-shared
+  archive: ^4.0.9
 
 dev_dependencies:
   flutter_test:

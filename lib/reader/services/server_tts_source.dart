@@ -169,6 +169,12 @@ class ServerTtsSource implements SpeechSource {
   }
 
   @override
+  void setProgressHandler(NarrationProgressHandler? handler) {
+    // The server returns one audio blob per request, so there is no
+    // word-level position to report; the default no-op stands.
+  }
+
+  @override
   Future<void> dispose() async {
     await _player.dispose();
     _client.close();

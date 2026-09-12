@@ -134,17 +134,36 @@ class LibrarySandbox {
   }
 
   /// Sanity check on decoded content before it is written to disk.
+  ///
+  /// The declared size is the file's real size from the listing. What actually
+  /// arrives can legitimately be larger: the server JSON-wraps contents, and
+  /// binary bytes that survive as UTF-8 replacement characters cost 3 bytes
+  /// each (a 1.2 MB PDF arrives as ~3 MB). Only a gap no encoding can explain
+  /// counts as the server lying.
   Uint8List validateContent(Uint8List bytes, {required int declaredSize}) {
     if (bytes.isEmpty) {
       throw const LibrarySandboxError('server returned an empty file');
     }
-    if (bytes.length > ReaderConfig.maxFileBytes) {
+    if (declaredSize > ReaderConfig.maxFileBytes) {
       throw LibrarySandboxError(
-          'file is ${bytes.length} bytes, cap is ${ReaderConfig.maxFileBytes}');
+          'file is $declaredSize bytes, cap is ${ReaderConfig.maxFileBytes}');
     }
-    if (declaredSize > 0 && bytes.length > declaredSize * 2 + 1024) {
-      throw LibrarySandboxError(
-          'size mismatch: declared $declaredSize but received ${bytes.length}');
+    if (bytes.length > ReaderConfig.maxTransferBytes) {
+      throw LibrarySandboxError('response is ${bytes.length} bytes, cap is '
+          '${ReaderConfig.maxTransferBytes}');
+    }
+    if (declaredSize > 0) {
+      // 4x plus slack absorbs JSON wrapping and UTF-8 expansion while still
+      // catching a server that streams something unrelated.
+      if (bytes.length > declaredSize * 4 + 65536) {
+        throw LibrarySandboxError(
+            'size mismatch: declared $declaredSize but received ${bytes.length}');
+      }
+      // A truncated response is the one mismatch worth failing on.
+      if (bytes.length * 4 < declaredSize) {
+        throw LibrarySandboxError(
+            'truncated: declared $declaredSize but received only ${bytes.length}');
+      }
     }
     return bytes;
   }

@@ -25,18 +25,40 @@ class ReaderHomeScreen extends StatefulWidget {
 }
 
 class _ReaderHomeScreenState extends State<ReaderHomeScreen> {
+  /// Saved positions for books that have been opened before, by book id.
+  Map<String, ReadingProgress> _saved = {};
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _refresh());
   }
 
-  Future<void> _refresh() {
-    return context.read<LibraryProvider>().refresh(
+  Future<void> _refresh() async {
+    await context.read<LibraryProvider>().refresh(
           transport: widget.transport,
           serverId: widget.serverId,
           serverName: widget.serverName,
         );
+    await _loadProgress();
+  }
+
+  /// Pulls every saved position so the shelf can offer "continue".
+  ///
+  /// Sequential on purpose: the list is short, and hammering
+  /// SharedPreferences in parallel gains nothing.
+  Future<void> _loadProgress() async {
+    final library = context.read<LibraryProvider>();
+    final reader = context.read<ReaderProvider>();
+    final loaded = <String, ReadingProgress>{};
+
+    for (final book in library.books) {
+      final progress = await reader.loadProgress(book.id);
+      if (progress != null && progress.pageIndex > 0) {
+        loaded[book.id] = progress;
+      }
+    }
+    if (mounted) setState(() => _saved = loaded);
   }
 
   @override
@@ -74,11 +96,17 @@ class _ReaderHomeScreenState extends State<ReaderHomeScreen> {
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 final book = library.books[index];
+                final saved = _saved[book.id];
                 return _BookTile(
                   book: book,
                   cached: library.isCached(book),
+                  downloading: library.isDownloading(book.id),
                   progress: library.progressFor(book.id),
+                  saved: saved,
                   onTap: () => _openBook(context, book),
+                  onRestart: saved == null
+                      ? null
+                      : () => _openBook(context, book, fromStart: true),
                   onDownload: () => _download(context, book),
                   onDelete: () =>
                       context.read<LibraryProvider>().remove(book),
@@ -91,27 +119,79 @@ class _ReaderHomeScreenState extends State<ReaderHomeScreen> {
     );
   }
 
-  Future<void> _openBook(BuildContext context, Book book) async {
+  /// Opens [book]; pass [fromStart] to ignore the saved position.
+  Future<void> _openBook(BuildContext context, Book book,
+      {bool fromStart = false}) async {
     final library = context.read<LibraryProvider>();
+    // Immediate feedback: opening extracts text off-thread, but even the
+    // hand-off can take a moment for large books, so tell the user now.
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('正在打开《${book.title}》…'),
+        duration: const Duration(seconds: 30),
+      ),
+    );
     // Capture the reader before the await: once this frame's element is
     // deactivated, looking it up again is unsafe.
     final reader = context.read<ReaderProvider>();
-    final content = await library.open(
-      transport: widget.transport,
-      book: book,
-    );
-    if (!mounted || content == null) return;
+    BookContent? content;
+    final sw = Stopwatch()..start();
+    print('[OPEN] start open ${book.id}');
+    try {
+      content = await library.open(
+        transport: widget.transport,
+        book: book,
+      );
+    } catch (e) {
+      print('[OPEN] open threw after ${sw.elapsedMilliseconds}ms: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('打开失败：$e')),
+        );
+      }
+      return;
+    }
+    print('[OPEN] open returned after ${sw.elapsedMilliseconds}ms '
+        'content=${content == null ? 'NULL' : 'len=${content.text.length}'}');
+    if (!mounted || content == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('无法读取本地副本，请尝试重新下载')),
+        );
+      }
+      return;
+    }
 
-    reader.openBook(book, content);
+    await reader.openBook(book, content);
+    if (fromStart) reader.goToPage(0);
     if (!mounted) return;
+    // Content is now loaded and the reader will display it; clear the
+    // "opening" hint right away so it does not linger on the reader screen.
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const BookReaderScreen()),
     );
+
+    // The reader saved its position on the way out; show it on the shelf.
+    await _loadProgress();
   }
 
   Future<void> _download(BuildContext context, Book book) async {
     final library = context.read<LibraryProvider>();
+    // Re-entrancy guard: the provider already blocks concurrent downloads, but
+    // show a clear hint instead of a misleading "download failed" later.
+    if (library.isDownloading(book.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('《${book.title}》正在下载中…')),
+      );
+      return;
+    }
+
+    // Immediate feedback: the click registered and a download is starting.
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('开始下载《${book.title}》…')),
+    );
     final content = await library.download(
       transport: widget.transport,
       book: book,
@@ -134,7 +214,10 @@ class _BookTile extends StatelessWidget {
     required this.book,
     required this.cached,
     required this.progress,
+    required this.saved,
     required this.onTap,
+    required this.onRestart,
+    required this.downloading,
     required this.onDownload,
     required this.onDelete,
   });
@@ -142,13 +225,16 @@ class _BookTile extends StatelessWidget {
   final Book book;
   final bool cached;
   final double progress;
+  final ReadingProgress? saved;
   final VoidCallback onTap;
+  final VoidCallback? onRestart;
+  final bool downloading;
   final VoidCallback onDownload;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
-    final downloading = progress > 0 && progress < 1;
+    final percent = saved == null ? 0 : (saved!.percent * 100).round();
 
     return ListTile(
       leading: Icon(
@@ -162,25 +248,53 @@ class _BookTile extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('${book.sizeLabel}${cached ? '  ·  已下载' : ''}'),
+          Text(
+            saved != null
+                ? '${book.sizeLabel}  ·  已读 $percent%'
+                : (cached
+                    ? '${book.sizeLabel}  ·  已下载'
+                    : (downloading
+                        ? '${book.sizeLabel}  ·  下载中…'
+                        : book.sizeLabel)),
+          ),
           if (downloading)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: LinearProgressIndicator(value: progress),
+              child: LinearProgressIndicator(
+                value: progress > 0 ? progress : null,
+              ),
             ),
         ],
       ),
-      trailing: cached
-          ? IconButton(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (onRestart != null)
+            IconButton(
+              icon: const Icon(Icons.replay),
+              tooltip: '从头开始',
+              onPressed: onRestart,
+            ),
+          if (cached)
+            IconButton(
               icon: const Icon(Icons.delete_outline),
               tooltip: '删除本地副本',
               onPressed: onDelete,
             )
-          : IconButton(
+          else if (downloading)
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            )
+          else
+            IconButton(
               icon: const Icon(Icons.download),
               tooltip: '下载',
               onPressed: onDownload,
             ),
+        ],
+      ),
       onTap: onTap,
     );
   }
@@ -203,7 +317,8 @@ class _EmptyShelf extends StatelessWidget {
             const Text('书架上还没有书', style: TextStyle(fontSize: 16)),
             const SizedBox(height: 8),
             Text(
-              '把 .txt 或 .md 文件放到服务器工作区的 library/ 目录下即可看到。\n'
+              '把 .txt / .md / .pdf / .epub / .mobi / .html / .json 文件放到服务器'
+              '工作区的 library/ 目录下即可看到。\n'
               '为保护隐私，只有该目录内的文件会被读取。',
               textAlign: TextAlign.center,
               style: TextStyle(color: Theme.of(context).disabledColor),

@@ -1,10 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:path_provider/path_provider.dart';
 
 import '../models/book.dart';
+import 'book_text_extractor.dart';
+import 'pdf_image_decoder.dart';
+import 'file_body_decoder.dart';
+import 'file_type_detector.dart';
 import 'library_sandbox.dart';
 
 /// Knows how to talk to one server's file API. Implemented by the two
@@ -32,6 +37,33 @@ class TransportResponse {
   bool get isOk => statusCode >= 200 && statusCode < 300;
 }
 
+/// Request handed to the background isolate. Every field is sendable so the
+/// whole object can cross the isolate boundary.
+class _ExtractRequest {
+  const _ExtractRequest(this.sendPort, this.bytes, this.type);
+  final SendPort sendPort;
+  final Uint8List bytes;
+  final FileType type;
+}
+
+/// Error returned from the background isolate. It carries a string (not the
+/// raw exception) so it is always sendable across isolates.
+class _ExtractError {
+  const _ExtractError(this.message);
+  final String message;
+}
+
+/// Runs in the background isolate: turns raw bytes into readable text without
+/// touching the UI thread. Errors are stringified so they survive the trip back.
+Future<void> _extractIsolateEntry(_ExtractRequest req) async {
+  try {
+    final text = await DefaultBookTextExtractor().extract(req.bytes, req.type);
+    req.sendPort.send(text);
+  } catch (e) {
+    req.sendPort.send(_ExtractError('$e'));
+  }
+}
+
 /// Lists and downloads books from a server's `library` directory.
 ///
 /// Every path passes through [LibrarySandbox] before a request is made, so the
@@ -39,8 +71,17 @@ class TransportResponse {
 class LibraryService {
   final LibrarySandbox sandbox;
 
-  LibraryService({LibrarySandbox? sandbox, this.storage})
-      : sandbox = sandbox ?? const LibrarySandbox();
+  LibraryService({
+    LibrarySandbox? sandbox,
+    this.storage,
+    FileBodyDecoder? bodyDecoder,
+  })  : sandbox = sandbox ?? const LibrarySandbox(),
+        _bodyDecoder = bodyDecoder ?? const FileBodyDecoder();
+
+  final FileTypeDetector _fileTypeDetector = const FileTypeDetector();
+
+  /// Removes the server's JSON envelope before anything else looks at a file.
+  final FileBodyDecoder _bodyDecoder;
 
   /// Where downloaded files land. Injectable so tests do not need platform
   /// channels, and so the storage policy lives in one place: the app-private
@@ -57,18 +98,30 @@ class LibraryService {
     required FileTransport transport,
     required String serverId,
     required String serverName,
-    String subdir = '/',
+    String subdir = '',
   }) async {
-    final dir = subdir.isEmpty || subdir == '.' ? '/' : sandbox.resolveDir(subdir);
+    final dir = (subdir.isEmpty || subdir == '/' || subdir == '.') ? 'library' : sandbox.resolveDir(subdir);
+    final encodedPath = Uri.encodeComponent(dir);
 
     final response = await transport.get(
-      '/api/studio/files/list?path=${Uri.encodeComponent(dir)}',
+      '/api/studio/files/list?path=$encodedPath',
     );
-    print('[SHELF] GET dir=$dir status=${response.statusCode} bodyLen=${response.body?.length ?? 0}');
+    print('[SHELF] GET dir=$dir status=${response.statusCode} bodyLen=${response.body.length}');
 
     if (!response.isOk) {
-      throw LibrarySandboxError(
-          'listing failed with status ${response.statusCode}');
+      // Extract error detail from response body for better diagnostics
+      String detail = '${response.statusCode}';
+      if (response.body.isNotEmpty) {
+        try {
+          detail = utf8.decode(response.body, allowMalformed: true).trim();
+          if (detail.length > 200) detail = '${detail.substring(0, 200)}...';
+        } catch (_) {}
+      }
+      throw LibrarySandboxError('listing failed: $detail');
+    }
+
+    if (response.body.isEmpty) {
+      throw LibrarySandboxError('listing returned empty body from server');
     }
 
     final decoded = _decodeJson(response.body);
@@ -81,6 +134,7 @@ class LibraryService {
 
       final isDir = entry['is_dir'] as bool? ??
           entry['isDirectory'] as bool? ??
+          entry['isDir'] as bool? ??
           false;
       if (isDir) continue;
 
@@ -96,7 +150,12 @@ class LibraryService {
         continue;
       }
 
-      final modified = entry['modified'] ?? entry['modified_at'];
+      final modified = entry['modified'] ?? entry['modified_at'] ?? entry['modTime'];
+      final fileType = _fileTypeDetector.detect(name);
+
+      // Skip files with unsupported formats
+      if (fileType == FileType.unknown) continue;
+
       books.add(Book(
         id: '$serverId::$resolved',
         serverId: serverId,
@@ -107,6 +166,7 @@ class LibraryService {
         modifiedAt: modified is num
             ? DateTime.fromMillisecondsSinceEpoch(modified.toInt() * 1000)
             : DateTime.tryParse(modified?.toString() ?? ''),
+        fileType: fileType,
       ));
     }
 
@@ -127,36 +187,147 @@ class LibraryService {
     final safePath = sandbox.resolve(book.relativePath);
     sandbox.checkTransfer(book.sizeBytes);
 
-    final response = await transport.get(
-      '/api/studio/files/read?path=${Uri.encodeComponent(safePath)}',
+    final type = _typeOf(book);
+    final bytes = await _fetchBytes(transport, safePath, type);
+    final validated = sandbox.validateContent(
+      bytes,
+      declaredSize: book.sizeBytes,
     );
 
+    final text = await _extractOffThread(validated, type);
+
+    // Persist into app-private storage — no external storage permission is
+    // requested anywhere in this feature. Done outside the try above so a disk
+    // error is not reported as a network error.
+    await _storage.save(book, validated);
+
+    return BookContent(
+      bookId: book.id,
+      text: text.text,
+      pageBreaks: text.breaks,
+    );
+  }
+
+  /// Reads a previously downloaded book from local storage, or null.
+  Future<BookContent?> readCached(Book book) async {
+    // Reuse a prior extraction so a cached book opens instantly; the extractor
+    // is slow enough (seconds for a large PDF) to warrant caching.
+    final meta = await _storage.loadMeta(book);
+    if (meta != null) {
+      return BookContent(
+        bookId: book.id,
+        text: meta.text,
+        pageBreaks: meta.breaks,
+        images: meta.images,
+      );
+    }
+
+    final raw = await _storage.load(book);
+    if (raw == null) return null;
+
+    // Cached copies written by an older build may still carry the envelope.
+    final type = _typeOf(book);
+    final bytes = _bodyDecoder.decode(raw, type: type);
+    final text = await _extractOffThread(bytes, type);
+    await _storage.saveMeta(book, text.text, text.breaks, text.images);
+    return BookContent(
+      bookId: book.id,
+      text: text.text,
+      pageBreaks: text.breaks,
+      images: text.images,
+    );
+  }
+
+  /// Extracts readable text off the UI thread so large/garbled PDFs and EPUBs
+  /// cannot freeze the app (they used to block the main isolate for up to a
+  /// minute, triggering an Android "not responding" dialog).
+  Future<ExtractedText> _extractOffThread(List<int> bytes, FileType type) async {
+    final sw = Stopwatch()..start();
+    print('[EXTRACT] start bytes=${bytes.length} type=$type');
+    final receivePort = ReceivePort();
+    await Isolate.spawn(
+      _extractIsolateEntry,
+      _ExtractRequest(receivePort.sendPort, Uint8List.fromList(bytes), type),
+    );
+    final response = await receivePort.first;
+    if (response is _ExtractError) {
+      throw Exception(response.message);
+    }
+    final r = response as ExtractedText;
+    print('[EXTRACT] done in ${sw.elapsedMilliseconds}ms len=${r.text.length} '
+        'breaks=${r.breaks.length}');
+    return r;
+  }
+
+  /// Fetches a file, unwrapping the server's JSON envelope.
+  ///
+  /// Binary formats cannot survive the server's string round-trip: bytes above
+  /// 0x7F come back as U+FFFD and the file is ruined. When that is detected we
+  /// ask once more for base64, which some servers support; if that also fails
+  /// the damaged payload is returned so the user at least sees a reason.
+  Future<Uint8List> _fetchBytes(
+    FileTransport transport,
+    String safePath,
+    FileType type,
+  ) async {
+    final response = await transport.get(_readPath(safePath));
     if (!response.isOk) {
       throw LibrarySandboxError(
           'download failed with status ${response.statusCode}');
     }
 
-    final bytes = sandbox.validateContent(
-      response.body,
-      declaredSize: book.sizeBytes,
-    );
+    final payload = _bodyDecoder.decode(response.body, type: type);
+    if (!_fileTypeDetector.needsExtraction(type) || !_isDamaged(payload)) {
+      return payload;
+    }
 
-    final text = _decodeText(bytes);
-
-    // Persist into app-private storage — no external storage permission is
-    // requested anywhere in this feature. Done outside the try above so a disk
-    // error is not reported as a network error.
-    await _storage.save(book, bytes);
-
-    return BookContent(bookId: book.id, text: text);
+    final retry = await transport.get(_readPath(safePath, encoding: 'base64'));
+    if (!retry.isOk) return payload;
+    return _decodeBase64Body(retry.body, type) ?? payload;
   }
 
-  /// Reads a previously downloaded book from local storage, or null.
-  Future<BookContent?> readCached(Book book) async {
-    final bytes = await _storage.load(book);
-    if (bytes == null) return null;
-    return BookContent(bookId: book.id, text: _decodeText(bytes));
+  String _readPath(String safePath, {String? encoding}) {
+    final query = <String, String>{'path': safePath};
+    if (encoding != null) query['encoding'] = encoding;
+    return Uri(
+      path: '/api/studio/files/read',
+      queryParameters: query,
+    ).toString();
   }
+
+  /// True when the payload is text that carries UTF-8 replacement characters,
+  /// i.e. a binary file that went through a string round-trip.
+  bool _isDamaged(Uint8List bytes) {
+    try {
+      return FileBodyDecoder.looksBinaryDamaged(utf8.decode(bytes));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Unwraps and base64-decodes a retry response; null when it is not usable.
+  Uint8List? _decodeBase64Body(Uint8List body, FileType type) {
+    final payload = _bodyDecoder.decode(body, type: type);
+    String text;
+    try {
+      text = utf8.decode(payload).trim();
+    } catch (_) {
+      // Already binary — the retry gave us the real file.
+      return payload;
+    }
+    try {
+      final decoded = base64Decode(text);
+      if (decoded.isNotEmpty && !_isDamaged(decoded)) return decoded;
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  /// Books persisted before [Book.fileType] existed carry a null type, so fall
+  /// back to the extension rather than treating them as unknown.
+  FileType _typeOf(Book book) =>
+      book.fileType ?? _fileTypeDetector.detect(book.relativePath);
 
   /// Deletes the local copy.
   Future<void> deleteCached(Book book) => _storage.delete(book);
@@ -168,11 +339,18 @@ class LibraryService {
 
   static Map<String, dynamic> _decodeJson(Uint8List body) {
     try {
-      final text = utf8.decode(body, allowMalformed: true);
+      final text = utf8.decode(body, allowMalformed: true).trim();
+      if (text.isEmpty) {
+        throw LibrarySandboxError('response body is empty');
+      }
       final decoded = jsonDecode(text);
       if (decoded is Map<String, dynamic>) return decoded;
-      return {'entries': decoded as List<dynamic>? ?? []};
+      if (decoded is List) return {'entries': decoded};
+      return {'entries': []};
+    } on FormatException catch (e) {
+      throw LibrarySandboxError('malformed listing response: ${e.message}');
     } catch (e) {
+      if (e is LibrarySandboxError) rethrow;
       throw LibrarySandboxError('malformed listing response: $e');
     }
   }
@@ -184,17 +362,6 @@ class LibraryService {
         json['list'] as List? ??
         const [];
     return raw.whereType<Map<String, dynamic>>().toList();
-  }
-
-  /// Decodes bytes to text, falling back to latin-1 for files that are not
-  /// valid UTF-8 (older Chinese e-books are frequently GBK, which no decoder
-  /// here can recover — we surface it instead of showing mojibake).
-  static String _decodeText(Uint8List bytes) {
-    try {
-      return utf8.decode(bytes);
-    } catch (_) {
-      return String.fromCharCodes(bytes);
-    }
   }
 
   static String _stripExtension(String name) {
@@ -227,11 +394,77 @@ class BookStorage {
     }
   }
 
+  /// Saves the extracted text and page breaks alongside the file so a cached
+  /// book opens instantly on later taps, instead of re-running the (slow)
+  /// extractor every time.
+  Future<void> saveMeta(
+    Book book,
+    String text,
+    List<int> breaks, [
+    List<PdfImage> images = const [],
+  ]) async {
+    try {
+      final file = await _metaFile(book);
+      await file.writeAsString(jsonEncode({
+        'version': _metaVersion,
+        'text': text,
+        'breaks': breaks,
+        'images': images
+            .map((e) => {
+                  'mime': e.mime,
+                  'width': e.width,
+                  'height': e.height,
+                  'data': base64Encode(e.bytes),
+                })
+            .toList(),
+      }));
+    } catch (_) {
+      // Best effort — re-extraction next time is harmless.
+    }
+  }
+
+  /// Loads a previously saved extraction, or null.
+  ///
+  /// A mismatched [BookTextMeta.version] means the cache was written by an
+  /// older extractor (e.g. before PDF font/ToUnicode decoding was fixed) and
+  /// must be re-derived, so stale/garbled text is never served from cache.
+  Future<BookTextMeta?> loadMeta(Book book) async {
+    try {
+      final file = await _metaFile(book);
+      if (!await file.exists()) return null;
+      final map = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      if (map['version'] != _metaVersion) return null;
+      final raw = map['images'];
+      final images = raw is List
+          ? [
+              for (final e in raw)
+                PdfImage(
+                  base64Decode(e['data'] as String),
+                  e['mime'] as String,
+                  e['width'] as int,
+                  e['height'] as int,
+                )
+            ]
+          : const <PdfImage>[];
+      return BookTextMeta(
+        map['text'] as String,
+        List<int>.from(map['breaks'] as List),
+        images,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> delete(Book book) async {
     try {
       final file = await _file(book);
       if (await file.exists()) {
         await file.delete();
+      }
+      final meta = await _metaFile(book);
+      if (await meta.exists()) {
+        await meta.delete();
       }
     } catch (_) {
       // Best effort — a failed cleanup must not break the UI.
@@ -256,4 +489,22 @@ class BookStorage {
         .localFileName(book.serverId, book.relativePath);
     return File('${booksDir.path}/$name');
   }
+
+  Future<File> _metaFile(Book book) async {
+    final file = await _file(book);
+    return File('${file.path}.meta');
+  }
 }
+
+/// Extracted text plus page-break offsets, persisted next to a cached book.
+class BookTextMeta {
+  const BookTextMeta(this.text, this.breaks, this.images);
+  final String text;
+  final List<int> breaks;
+  final List<PdfImage> images;
+}
+
+/// Bump when the extraction logic changes in a way that invalidates cached
+/// text (e.g. the PDF font/ToUnicode decoding fix). Old `.meta` files are
+/// ignored and re-extracted.
+const int _metaVersion = 4;
