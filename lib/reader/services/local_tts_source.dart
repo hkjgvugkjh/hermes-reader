@@ -16,6 +16,11 @@ class LocalTtsSource implements SpeechSource {
   final FlutterTts _tts;
   bool _initialized = false;
 
+  /// Set when [stop] interrupts an in-flight [speak]. flutter_tts resolves the
+  /// pending speak() promise with `0` on interruption, which would otherwise be
+  /// mis-reported as an engine failure.
+  bool _stopRequested = false;
+
   @override
   SpeechEngine get engine => SpeechEngine.local;
 
@@ -39,27 +44,51 @@ class LocalTtsSource implements SpeechSource {
   @override
   Future<void> speak(String text) async {
     await _ensureInit();
+    // Clear any stale flag left by an idle stop() so a genuine engine failure
+    // on this utterance is still reported.
+    _stopRequested = false;
+
     await _tts.stop();
 
-    // Guard against an engine that never reports completion. Without this, a
-    // device with no default TTS engine configured leaves the reader stuck
-    // mid-narration with no way out but a restart.
-    final result = await _tts.speak(text).timeout(
-          _speakTimeout,
-          onTimeout: () {
-            throw TimeoutException(
-              'local TTS did not complete within ${_speakTimeout.inSeconds}s '
-              '(is a default TTS engine configured on this device?)',
-              _speakTimeout,
-            );
-          },
-        );
-
-    // flutter_tts returns 1 on success; anything else means the engine
-    // refused the utterance (common when no TTS data is installed).
-    if (result != null && result is int && result != 1) {
-      throw Exception('local TTS engine returned $result');
+    if (await _speakOnce(text)) {
+      _stopRequested = false;
+      return;
     }
+    // The first attempt may fail while the engine is still binding on a cold
+    // start (flutter_tts reports "not bound to TTS engine"). Retry once.
+    if (_stopRequested) {
+      _stopRequested = false;
+      return;
+    }
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (await _speakOnce(text)) {
+      _stopRequested = false;
+      return;
+    }
+    if (_stopRequested) {
+      _stopRequested = false;
+      return;
+    }
+    throw Exception('local TTS engine returned 0');
+  }
+
+  /// Speaks [text] and resolves true on success. flutter_tts resolves the
+  /// promise with `1` on success, `0` on a refused utterance, or `null` on some
+  /// platforms (treated as success for compatibility).
+  Future<bool> _speakOnce(String text) async {
+    final result = await _tts.speak(text).timeout(
+      _speakTimeout,
+      onTimeout: () {
+        throw TimeoutException(
+          'local TTS did not complete within ${_speakTimeout.inSeconds}s '
+          '(is a default TTS engine configured on this device?)',
+          _speakTimeout,
+        );
+      },
+    );
+    if (result == null) return true;
+    if (result is int) return result == 1;
+    return false;
   }
 
   /// Upper bound for one utterance. Generous: a full page of Chinese prose
@@ -67,7 +96,10 @@ class LocalTtsSource implements SpeechSource {
   static const _speakTimeout = Duration(minutes: 2);
 
   @override
-  Future<void> stop() => _tts.stop();
+  Future<void> stop() async {
+    _stopRequested = true; // mark the in-flight speak() as intentionally stopped
+    await _tts.stop();
+  }
 
   @override
   Future<void> setRate(double rate) async {
@@ -99,6 +131,25 @@ class LocalTtsSource implements SpeechSource {
         IosTextToSpeechAudioCategoryOptions.mixWithOthers,
       ],
     );
+
+    // Force the platform engine to finish binding before we configure/speak.
+    // On Android this awaits onInit; without it the first speak() can fail with
+    // "not bound to TTS engine" when no engine is selected as default.
+    try {
+      final engines = (await _tts.getEngines) as List?;
+      if (engines == null || engines.isEmpty) {
+        throw Exception(
+          '本机未检测到可用的文字转语音(TTS)引擎。请到 系统设置 → 语言与输入法/辅助功能 '
+          '→ 文字转语音输出 中安装并选择语音引擎（如讯飞语音、Google 文字转语音），'
+          '下载语言包后重试。',
+        );
+      }
+    } catch (e) {
+      // A platform-level failure (e.g. getEngines unsupported) is re-thrown
+      // only when it is our own "no engine" message; otherwise fall through and
+      // let the first speak() surface the real error.
+      if (e is Exception && e.toString().contains('TTS引擎')) rethrow;
+    }
 
     // Prefer the device locale, but fall back to whatever the engine has.
     try {

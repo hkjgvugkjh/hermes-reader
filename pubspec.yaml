@@ -33,6 +33,7 @@ dependencies:
       url: https://github.com/hkjgvugkjh/hermes-shared.git
       ref: main
   archive: ^4.0.9
+  gbk_codec: ^0.4.0
 
 dev_dependencies:
   flutter_test:

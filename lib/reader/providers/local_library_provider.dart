@@ -4,6 +4,10 @@ import 'package:flutter/foundation.dart';
 import 'package:hermes_shared/hermes_shared.dart';
 
 import '../models/book.dart';
+import '../services/external_library_dir.dart';
+import '../services/file_type_detector.dart';
+import '../services/library_cache_index.dart';
+import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
 import '../services/local_library_transport.dart';
 import 'library_provider.dart';
@@ -22,11 +26,15 @@ class LocalLibraryProvider extends ChangeNotifier {
     required this.rootDir,
     this.forwardClient,
     LibraryService? service,
-  }) : shelf = LibraryProvider(service ?? LibraryService());
+    this.index,
+  }) : shelf = LibraryProvider(service ?? LibraryService()),
+       _cacheIndex = index ?? const LibraryCacheIndex();
 
   final Directory rootDir;
   final LocalLibraryClient? forwardClient;
   final LibraryProvider shelf;
+  final LibraryCacheIndex? index;
+  final LibraryCacheIndex _cacheIndex;
 
   FileTransport get transport => LocalFileSystemTransport(rootDir);
 
@@ -41,6 +49,85 @@ class LocalLibraryProvider extends ChangeNotifier {
   Future<BookContent?> download(Book book) =>
       shelf.download(transport: transport, book: book);
   Future<void> removeLocal(Book book) => shelf.remove(book);
+
+  /// Groups the on-device download cache (`books/`) by source server id so the
+  /// local library can show each remote server's downloaded books as its own
+  /// section. [knownServerIds] lets us recover the server id even when it
+  /// contains underscores, because the cache filename is `<serverId>_<flatPath>`.
+  Future<Map<String, List<File>>> cachedFilesByServer(
+    List<String> knownServerIds,
+  ) async {
+    final dir = await ExternalLibraryDir.booksDirectory();
+    if (!await dir.exists()) return const {};
+    final out = <String, List<File>>{};
+    await for (final entity in dir.list()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (name.endsWith('.meta')) continue;
+      final serverId = _serverIdFromCacheName(name, knownServerIds);
+      if (serverId == null) continue;
+      out.putIfAbsent(serverId, () => []).add(entity);
+    }
+    return out;
+  }
+
+  /// Reconstructs a [Book] for a cached download so it can be listed and opened
+  /// from the local library. The relative path is the flattened cache name, which
+  /// [BookStorage] maps back to the very same file.
+  Future<Book> bookFromCache(File file, String serverId) async {
+    final name = file.uri.pathSegments.last;
+    final safeRel = name.substring(serverId.length + 1);
+    final size = await file.length();
+    // Prefer the real title recorded in the cache index when available (the
+    // cache filename is sanitised and loses the original Chinese name).
+    final realTitle = await _cacheIndex.titleOf(name);
+    return Book(
+      id: '$serverId::$safeRel',
+      serverId: serverId,
+      serverName: '',
+      relativePath: safeRel,
+      title: realTitle ?? _stripExtension(safeRel),
+      sizeBytes: size,
+      fileType: const FileTypeDetector().detect(safeRel),
+    );
+  }
+
+  /// The cache filename key used by the index for [book].
+  String _cacheName(Book book) =>
+      const LibrarySandbox().localFileName(book.serverId, book.relativePath);
+
+  /// Reads the locally cached copy, forcing [encoding] (e.g. 'gbk') when given so
+  /// a manual charset fix is reapplied and persisted to the cache index.
+  Future<BookContent?> readCached(Book book, {String? encoding}) =>
+      shelf.readCached(book, encoding: encoding);
+
+  /// Persists the user-selected encoding for [book] into the cache index.
+  Future<void> setEncoding(Book book, String encoding) async {
+    await _cacheIndex.setEncoding(_cacheName(book), encoding);
+  }
+
+  /// The currently selected encoding label for [book] ('auto' by default).
+  Future<String> encodingLabelOf(Book book) async =>
+      await _cacheIndex.encodingOf(_cacheName(book));
+
+  static String? _serverIdFromCacheName(String name, List<String> knownServerIds) {
+    String? best;
+    for (final id in knownServerIds) {
+      if (id.isEmpty) continue;
+      if (name.startsWith('${id}_') && (best == null || id.length > best.length)) {
+        best = id;
+      }
+    }
+    if (best != null) return best;
+    final idx = name.indexOf('_');
+    return idx > 0 ? name.substring(0, idx) : null;
+  }
+
+  static String _stripExtension(String name) {
+    final dot = name.lastIndexOf('.');
+    if (dot <= 0) return name;
+    return name.substring(0, dot);
+  }
 
   Future<void> upload(String dir, String name, List<int> bytes) async {
     final target = Directory(_join(rootDir.path, _localRel(dir)));

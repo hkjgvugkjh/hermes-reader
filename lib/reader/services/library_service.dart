@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'external_library_dir.dart';
+import 'library_cache_index.dart';
 
 import '../models/book.dart';
 import 'book_text_extractor.dart';
@@ -40,10 +41,11 @@ class TransportResponse {
 /// Request handed to the background isolate. Every field is sendable so the
 /// whole object can cross the isolate boundary.
 class _ExtractRequest {
-  const _ExtractRequest(this.sendPort, this.bytes, this.type);
+  const _ExtractRequest(this.sendPort, this.bytes, this.type, [this.encoding]);
   final SendPort sendPort;
   final Uint8List bytes;
   final FileType type;
+  final String? encoding;
 }
 
 /// Error returned from the background isolate. It carries a string (not the
@@ -57,7 +59,11 @@ class _ExtractError {
 /// touching the UI thread. Errors are stringified so they survive the trip back.
 Future<void> _extractIsolateEntry(_ExtractRequest req) async {
   try {
-    final text = await DefaultBookTextExtractor().extract(req.bytes, req.type);
+    final text = await DefaultBookTextExtractor().extract(
+      req.bytes,
+      req.type,
+      encoding: req.encoding,
+    );
     req.sendPort.send(text);
   } catch (e) {
     req.sendPort.send(_ExtractError('$e'));
@@ -70,13 +76,16 @@ Future<void> _extractIsolateEntry(_ExtractRequest req) async {
 /// app cannot be tricked into reading outside that directory.
 class LibraryService {
   final LibrarySandbox sandbox;
+  final LibraryCacheIndex _index;
 
   LibraryService({
     LibrarySandbox? sandbox,
     this.storage,
     FileBodyDecoder? bodyDecoder,
+    LibraryCacheIndex? index,
   })  : sandbox = sandbox ?? const LibrarySandbox(),
-        _bodyDecoder = bodyDecoder ?? const FileBodyDecoder();
+        _bodyDecoder = bodyDecoder ?? const FileBodyDecoder(),
+        _index = index ?? const LibraryCacheIndex();
 
   final FileTypeDetector _fileTypeDetector = const FileTypeDetector();
 
@@ -182,6 +191,7 @@ class LibraryService {
   Future<BookContent> downloadBook({
     required FileTransport transport,
     required Book book,
+    String? encoding,
   }) async {
     // Re-validate even for a Book that came from our own listing — the object
     // may have been persisted and tampered with.
@@ -195,12 +205,21 @@ class LibraryService {
       declaredSize: book.sizeBytes,
     );
 
-    final text = await _extractOffThread(validated, type);
+    final text = await _extractOffThread(validated, type, encoding: encoding);
 
     // Persist into the external `hermes-reader/books` folder (see
     // [ExternalLibraryDir]) so the download survives an app uninstall. Done
     // outside the try above so a disk error is not reported as a network error.
     await _storage.save(book, validated);
+
+    final cacheName = sandbox.localFileName(book.serverId, book.relativePath);
+    await _index.recordDownload(
+      cacheFileName: cacheName,
+      serverId: book.serverId,
+      relativePath: book.relativePath,
+      title: book.title,
+      sizeBytes: book.sizeBytes,
+    );
 
     return BookContent(
       bookId: book.id,
@@ -210,26 +229,45 @@ class LibraryService {
   }
 
   /// Reads a previously downloaded book from local storage, or null.
-  Future<BookContent?> readCached(Book book) async {
-    // Reuse a prior extraction so a cached book opens instantly; the extractor
-    // is slow enough (seconds for a large PDF) to warrant caching.
-    final meta = await _storage.loadMeta(book);
-    if (meta != null) {
-      return BookContent(
-        bookId: book.id,
-        text: meta.text,
-        pageBreaks: meta.breaks,
-        images: meta.images,
-      );
+  ///
+  /// [encoding] forces a specific codepage (e.g. 'gbk') to fix mojibake and is
+  /// persisted via [LibraryCacheIndex] so the choice survives restarts. When
+  /// null/absent, the index's stored encoding (default 'auto') is used.
+  ///
+  /// Text formats re-decode on every open so a charset fix applies immediately;
+  /// slow binary formats (PDF/EPUB) reuse the cached extraction.
+  Future<BookContent?> readCached(Book book, {String? encoding}) async {
+    final type = _typeOf(book);
+    final cacheName = sandbox.localFileName(book.serverId, book.relativePath);
+    final enc = encoding ?? await _index.encodingOf(cacheName);
+
+    if (encoding != null) {
+      // A manual pick always wins and is remembered.
+      await _index.setEncoding(cacheName, encoding);
+    }
+
+    if (!_isTextual(type)) {
+      final meta = await _storage.loadMeta(book);
+      if (meta != null) {
+        return BookContent(
+          bookId: book.id,
+          text: meta.text,
+          pageBreaks: meta.breaks,
+          images: meta.images,
+        );
+      }
     }
 
     final raw = await _storage.load(book);
     if (raw == null) return null;
 
     // Cached copies written by an older build may still carry the envelope.
-    final type = _typeOf(book);
     final bytes = _bodyDecoder.decode(raw, type: type);
-    final text = await _extractOffThread(bytes, type);
+    final text = await _extractOffThread(
+      bytes,
+      type,
+      encoding: enc == 'auto' ? null : enc,
+    );
     await _storage.saveMeta(book, text.text, text.breaks, text.images);
     return BookContent(
       bookId: book.id,
@@ -239,16 +277,29 @@ class LibraryService {
     );
   }
 
+  /// True for formats that decode fast enough to re-run on every open instead
+  /// of trusting a possibly stale cached extraction.
+  static bool _isTextual(FileType type) =>
+      type == FileType.plainText ||
+      type == FileType.html ||
+      type == FileType.mobi ||
+      type == FileType.json ||
+      type == FileType.unknown;
+
   /// Extracts readable text off the UI thread so large/garbled PDFs and EPUBs
   /// cannot freeze the app (they used to block the main isolate for up to a
   /// minute, triggering an Android "not responding" dialog).
-  Future<ExtractedText> _extractOffThread(List<int> bytes, FileType type) async {
+  Future<ExtractedText> _extractOffThread(
+    List<int> bytes,
+    FileType type, {
+    String? encoding,
+  }) async {
     final sw = Stopwatch()..start();
-    print('[EXTRACT] start bytes=${bytes.length} type=$type');
+    print('[EXTRACT] start bytes=${bytes.length} type=$type encoding=$encoding');
     final receivePort = ReceivePort();
     await Isolate.spawn(
       _extractIsolateEntry,
-      _ExtractRequest(receivePort.sendPort, Uint8List.fromList(bytes), type),
+      _ExtractRequest(receivePort.sendPort, Uint8List.fromList(bytes), type, encoding),
     );
     final response = await receivePort.first;
     if (response is _ExtractError) {

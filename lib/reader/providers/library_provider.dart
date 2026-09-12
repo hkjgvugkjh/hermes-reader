@@ -9,6 +9,14 @@ import '../services/reader_config_storage.dart';
 import '../services/reading_progress_service.dart';
 import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
+import '../services/chapter_detector.dart';
+
+/// Runs chapter detection off the UI thread (see [ChapterDetector.detect]).
+/// Must be a top-level function so it can be passed to [compute].
+List<Map<String, dynamic>> _detectChaptersTask(String text) =>
+    ChapterDetector.detect(text)
+        .map((c) => <String, dynamic>{'title': c.title, 'offset': c.offset})
+        .toList();
 
 /// Owns the bookshelf: listing, downloading and cached copies.
 class LibraryProvider extends ChangeNotifier {
@@ -88,6 +96,7 @@ class LibraryProvider extends ChangeNotifier {
   Future<BookContent?> download({
     required FileTransport transport,
     required Book book,
+    String? encoding,
   }) async {
     if (_downloading.contains(book.id)) return null;
     _error = null;
@@ -99,6 +108,7 @@ class LibraryProvider extends ChangeNotifier {
       final content = await _service.downloadBook(
         transport: transport,
         book: book,
+        encoding: encoding,
       );
       _cached.add(book.id);
       _progress[book.id] = 1.0;
@@ -116,14 +126,24 @@ class LibraryProvider extends ChangeNotifier {
   }
 
   /// Opens a book, using the local copy when present.
+  ///
+  /// [encoding] forces a specific codepage (e.g. 'gbk') so a manual charset
+  /// fix is reapplied (and persisted) for either the cached or freshly
+  /// downloaded copy.
   Future<BookContent?> open({
     required FileTransport transport,
     required Book book,
+    String? encoding,
   }) async {
-    final cached = await _service.readCached(book);
+    final cached = await _service.readCached(book, encoding: encoding);
     if (cached != null) return cached;
-    return download(transport: transport, book: book);
+    return download(transport: transport, book: book, encoding: encoding);
   }
+
+  /// Reads the locally cached copy of [book], optionally forcing a specific
+  /// [encoding] (e.g. 'gbk') so a manual charset fix is reapplied and persisted.
+  Future<BookContent?> readCached(Book book, {String? encoding}) =>
+      _service.readCached(book, encoding: encoding);
 
   Future<void> remove(Book book) async {
     await _service.deleteCached(book);
@@ -190,6 +210,28 @@ class ReaderProvider extends ChangeNotifier {
   final List<BookPage> _pages = [];
   List<BookPage> get pages => List.unmodifiable(_pages);
 
+  /// Chapter headings detected in the background, in document order.
+  List<ChapterMark> _chapters = const [];
+  List<ChapterMark> get chapters => _chapters;
+
+  /// True once enough headings were found to build a usable table of contents.
+  bool get hasChapters => _chapters.length >= 2;
+
+  /// Index of the chapter containing the current page, or -1 when none.
+  int get currentChapterIndex {
+    if (_chapters.isEmpty) return -1;
+    final offset = currentPage?.startOffset ?? 0;
+    var idx = 0;
+    for (var i = 0; i < _chapters.length; i++) {
+      if (_chapters[i].offset <= offset) {
+        idx = i;
+      } else {
+        break;
+      }
+    }
+    return idx;
+  }
+
   /// Images pulled from the source, indexed by the [imageMarker] tokens embedded
   /// in each [BookPage.content].
   List<PdfImage> get images => _content?.images ?? const [];
@@ -246,6 +288,7 @@ class ReaderProvider extends ChangeNotifier {
     _book = book;
     _content = content;
     _error = null;
+    _chapters = const [];
     _rebuildPages();
 
     // Try to restore saved reading position
@@ -256,6 +299,49 @@ class ReaderProvider extends ChangeNotifier {
       _pageIndex = 0;
     }
     notifyListeners();
+
+    // Build the table of contents off the UI thread; the jump dialog falls
+    // back to plain page-jumping until (and unless) headings are found.
+    _detectChapters();
+  }
+
+  /// Detects chapter headings on a background isolate and publishes them.
+  ///
+  /// Best-effort: any failure silently leaves [_chapters] empty so reading is
+  /// never blocked on detection.
+  Future<void> _detectChapters() async {
+    final text = _content?.text;
+    if (text == null || text.isEmpty) return;
+    try {
+      final raw = await compute(_detectChaptersTask, text);
+      _chapters = raw
+          .map((m) =>
+              ChapterMark(title: m['title'] as String, offset: m['offset'] as int))
+          .toList();
+      notifyListeners();
+    } catch (_) {
+      _chapters = const [];
+    }
+  }
+
+  /// Maps a character [offset] in the full text to the page that contains it.
+  int _pageIndexForOffset(int offset) {
+    if (_pages.isEmpty) return 0;
+    var idx = 0;
+    for (var i = 0; i < _pages.length; i++) {
+      if (_pages[i].startOffset <= offset) {
+        idx = i;
+      } else {
+        break;
+      }
+    }
+    return idx;
+  }
+
+  /// Jumps to the page where the chapter at [index] begins.
+  void goToChapter(int index) {
+    if (index < 0 || index >= _chapters.length) return;
+    goToPage(_pageIndexForOffset(_chapters[index].offset));
   }
 
   /// Saves the current reading position before navigating away.
@@ -363,6 +449,7 @@ class ReaderProvider extends ChangeNotifier {
     _content = null;
     _pages.clear();
     _pageIndex = 0;
+    _chapters = const [];
     notifyListeners();
   }
 }
