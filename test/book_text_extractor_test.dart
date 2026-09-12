@@ -116,4 +116,24 @@ void main() {
         'a b c');
     expect(DefaultBookTextExtractor.cleanText('a\n\n\n\n\nb'), 'a\n\nb');
   });
+
+  test('GBK-encoded text is auto-detected and decoded', () async {
+    // 《你好》encoded as GBK (would be mojibake under latin-1 fallback).
+    final gbkBytes = Uint8List.fromList([0xC4, 0xE3, 0xBA, 0xC3]);
+    final result = await extractor.extract(gbkBytes, FileType.plainText);
+    expect(result.text, '你好');
+  });
+
+  test('UTF-8 is preferred over GBK for valid UTF-8 bytes', () async {
+    final result = await extractor.extract(
+        _bytes('天龙八部'), FileType.plainText);
+    expect(result.text, '天龙八部');
+  });
+
+  test('UTF-8 BOM is honoured', () async {
+    final bom = Uint8List.fromList(
+        [0xEF, 0xBB, 0xBF, ...utf8.encode('第一章')]);
+    final result = await extractor.extract(bom, FileType.plainText);
+    expect(result.text, '第一章');
+  });
 }

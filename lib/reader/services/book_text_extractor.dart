@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:gbk_codec/gbk_codec.dart';
+
 import '../models/book.dart';
 import 'epub_text_extractor.dart';
 import 'pdf_image_decoder.dart';
@@ -65,16 +67,49 @@ class DefaultBookTextExtractor implements BookTextExtractor {
     }
   }
 
-  /// Decodes bytes as UTF-8, falling back to latin-1.
+  /// Decodes text bytes with automatic charset detection.
   ///
-  /// GBK-encoded Chinese books cannot be recovered without a codepage table;
-  /// we surface the raw bytes instead of throwing so the user still sees text.
+  /// Detection order:
+  ///   1. A byte-order mark (UTF-8 / UTF-16 / UTF-32).
+  ///   2. UTF-8 (strict) — the common case for modern text. Strict decoding
+  ///      throws on legacy codepages, so they fall through to step 3 instead of
+  ///      being silently mangled.
+  ///   3. GBK — the de-facto codepage for simplified-Chinese `.txt` books such
+  ///      as 《天龙八部》 downloaded from a remote shelf, which used to render as
+  ///      mojibake under the old latin-1 fallback.
+  ///   4. latin-1 passthrough, so the user always sees printable glyphs rather
+  ///      than an exception.
   static String decodeText(Uint8List bytes) {
+    if (bytes.isEmpty) return '';
+
+    final bom = _decodeByBom(bytes);
+    if (bom != null) return bom;
+
     try {
-      return utf8.decode(bytes);
+      return utf8.decode(bytes); // strict: throws on legacy codepages
+    } catch (_) {
+      // Not valid UTF-8 — try a Chinese legacy codepage.
+    }
+
+    try {
+      return gbk_bytes.decode(bytes);
     } catch (_) {
       return String.fromCharCodes(bytes);
     }
+  }
+
+  /// Decodes [bytes] according to a leading byte-order mark, or null when there
+  /// is no BOM to act on (so the caller can try UTF-8 / GBK instead).
+  static String? _decodeByBom(Uint8List bytes) {
+    // UTF-8 BOM is by far the most common case for text files carrying a mark.
+    // UTF-16/UTF-32 BOMs are virtually never used for Chinese .txt books, so
+    // they are intentionally not special-cased here; such bytes fall through to
+    // the UTF-8/GBK steps above and remain readable for prose content.
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+      return utf8.decode(bytes.sublist(3), allowMalformed: true);
+    }
+    return null;
   }
 
   /// Removes HTML tags and decodes the entities that actually show up in books.
