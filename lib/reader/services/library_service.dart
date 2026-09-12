@@ -191,6 +191,7 @@ class LibraryService {
   Future<BookContent> downloadBook({
     required FileTransport transport,
     required Book book,
+    String? encoding,
   }) async {
     // Re-validate even for a Book that came from our own listing — the object
     // may have been persisted and tampered with.
@@ -204,7 +205,7 @@ class LibraryService {
       declaredSize: book.sizeBytes,
     );
 
-    final text = await _extractOffThread(validated, type);
+    final text = await _extractOffThread(validated, type, encoding: encoding);
 
     // Persist into the external `hermes-reader/books` folder (see
     // [ExternalLibraryDir]) so the download survives an app uninstall. Done
