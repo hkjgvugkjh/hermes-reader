@@ -211,23 +211,28 @@ class LibraryService {
 
   /// Reads a previously downloaded book from local storage, or null.
   Future<BookContent?> readCached(Book book) async {
-    // Reuse a prior extraction so a cached book opens instantly; the extractor
-    // is slow enough (seconds for a large PDF) to warrant caching.
-    final meta = await _storage.loadMeta(book);
-    if (meta != null) {
-      return BookContent(
-        bookId: book.id,
-        text: meta.text,
-        pageBreaks: meta.breaks,
-        images: meta.images,
-      );
+    final type = _typeOf(book);
+
+    // Text formats decode cheaply and must be re-decoded whenever charset
+    // detection improves (e.g. a GBK book that was previously shown as
+    // mojibake). Slow binary formats (PDF/EPUB) keep using the cached
+    // extraction so they still open instantly.
+    if (!_isTextual(type)) {
+      final meta = await _storage.loadMeta(book);
+      if (meta != null) {
+        return BookContent(
+          bookId: book.id,
+          text: meta.text,
+          pageBreaks: meta.breaks,
+          images: meta.images,
+        );
+      }
     }
 
     final raw = await _storage.load(book);
     if (raw == null) return null;
 
     // Cached copies written by an older build may still carry the envelope.
-    final type = _typeOf(book);
     final bytes = _bodyDecoder.decode(raw, type: type);
     final text = await _extractOffThread(bytes, type);
     await _storage.saveMeta(book, text.text, text.breaks, text.images);
@@ -238,6 +243,15 @@ class LibraryService {
       images: text.images,
     );
   }
+
+  /// True for formats that decode fast enough to re-run on every open instead
+  /// of trusting a possibly stale cached extraction.
+  static bool _isTextual(FileType type) =>
+      type == FileType.plainText ||
+      type == FileType.html ||
+      type == FileType.mobi ||
+      type == FileType.json ||
+      type == FileType.unknown;
 
   /// Extracts readable text off the UI thread so large/garbled PDFs and EPUBs
   /// cannot freeze the app (they used to block the main isolate for up to a
