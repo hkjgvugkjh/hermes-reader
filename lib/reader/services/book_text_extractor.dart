@@ -47,23 +47,28 @@ class DefaultBookTextExtractor implements BookTextExtractor {
   final EpubTextExtractor _epub;
 
   @override
-  Future<ExtractedText> extract(Uint8List bytes, FileType type) async {
+  Future<ExtractedText> extract(
+    Uint8List bytes,
+    FileType type, {
+    String? encoding,
+  }) async {
     switch (type) {
       case FileType.plainText:
-        return ExtractedText(decodeText(bytes));
+        return ExtractedText(decodeText(bytes, encoding: encoding));
       case FileType.html:
       case FileType.mobi:
         // MOBI wraps HTML, so the same tag stripping applies; whatever is left
         // that is not printable is dropped rather than shown as mojibake.
-        return ExtractedText(cleanText(stripHtml(decodeText(bytes))));
+        return ExtractedText(
+            cleanText(stripHtml(decodeText(bytes, encoding: encoding))));
       case FileType.json:
-        return ExtractedText(prettyJson(decodeText(bytes)));
+        return ExtractedText(prettyJson(decodeText(bytes, encoding: encoding)));
       case FileType.pdf:
         return _pdf.extract(bytes);
       case FileType.epub:
         return _epub.extract(bytes);
       case FileType.unknown:
-        return ExtractedText(decodeText(bytes));
+        return ExtractedText(decodeText(bytes, encoding: encoding));
     }
   }
 
@@ -79,8 +84,11 @@ class DefaultBookTextExtractor implements BookTextExtractor {
   ///      mojibake under the old latin-1 fallback.
   ///   4. latin-1 passthrough, so the user always sees printable glyphs rather
   ///      than an exception.
-  static String decodeText(Uint8List bytes) {
+  static String decodeText(Uint8List bytes, {String? encoding}) {
     if (bytes.isEmpty) return '';
+    if (encoding != null && encoding != 'auto') {
+      return _decodeWithEncoding(bytes, encoding);
+    }
 
     final bom = _decodeByBom(bytes);
     if (bom != null) return bom;
@@ -95,6 +103,23 @@ class DefaultBookTextExtractor implements BookTextExtractor {
       return gbk_bytes.decode(bytes);
     } catch (_) {
       return String.fromCharCodes(bytes);
+    }
+  }
+
+  /// Decodes with an explicitly chosen codepage, used by the manual encoding
+  /// switcher. Falls back to the auto pipeline for unknown hints.
+  static String _decodeWithEncoding(Uint8List bytes, String encoding) {
+    switch (encoding) {
+      case 'utf-8':
+        return utf8.decode(bytes, allowMalformed: true);
+      case 'gbk':
+        try {
+          return gbk_bytes.decode(bytes);
+        } catch (_) {
+          return String.fromCharCodes(bytes);
+        }
+      default:
+        return decodeText(bytes);
     }
   }
 

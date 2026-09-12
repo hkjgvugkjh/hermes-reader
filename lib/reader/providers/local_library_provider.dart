@@ -6,6 +6,8 @@ import 'package:hermes_shared/hermes_shared.dart';
 import '../models/book.dart';
 import '../services/external_library_dir.dart';
 import '../services/file_type_detector.dart';
+import '../services/library_cache_index.dart';
+import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
 import '../services/local_library_transport.dart';
 import 'library_provider.dart';
@@ -24,11 +26,15 @@ class LocalLibraryProvider extends ChangeNotifier {
     required this.rootDir,
     this.forwardClient,
     LibraryService? service,
-  }) : shelf = LibraryProvider(service ?? LibraryService());
+    this.index,
+  }) : shelf = LibraryProvider(service ?? LibraryService()),
+       _cacheIndex = index ?? const LibraryCacheIndex();
 
   final Directory rootDir;
   final LocalLibraryClient? forwardClient;
   final LibraryProvider shelf;
+  final LibraryCacheIndex? index;
+  final LibraryCacheIndex _cacheIndex;
 
   FileTransport get transport => LocalFileSystemTransport(rootDir);
 
@@ -72,16 +78,37 @@ class LocalLibraryProvider extends ChangeNotifier {
     final name = file.uri.pathSegments.last;
     final safeRel = name.substring(serverId.length + 1);
     final size = await file.length();
+    // Prefer the real title recorded in the cache index when available (the
+    // cache filename is sanitised and loses the original Chinese name).
+    final realTitle = await _cacheIndex.titleOf(name);
     return Book(
       id: '$serverId::$safeRel',
       serverId: serverId,
       serverName: '',
       relativePath: safeRel,
-      title: _stripExtension(safeRel),
+      title: realTitle ?? _stripExtension(safeRel),
       sizeBytes: size,
       fileType: const FileTypeDetector().detect(safeRel),
     );
   }
+
+  /// The cache filename key used by the index for [book].
+  String _cacheName(Book book) =>
+      const LibrarySandbox().localFileName(book.serverId, book.relativePath);
+
+  /// Reads the locally cached copy, forcing [encoding] (e.g. 'gbk') when given so
+  /// a manual charset fix is reapplied and persisted to the cache index.
+  Future<BookContent?> readCached(Book book, {String? encoding}) =>
+      shelf.readCached(book, encoding: encoding);
+
+  /// Persists the user-selected encoding for [book] into the cache index.
+  Future<void> setEncoding(Book book, String encoding) async {
+    await _cacheIndex.setEncoding(_cacheName(book), encoding);
+  }
+
+  /// The currently selected encoding label for [book] ('auto' by default).
+  Future<String> encodingLabelOf(Book book) async =>
+      await _cacheIndex.encodingOf(_cacheName(book));
 
   static String? _serverIdFromCacheName(String name, List<String> knownServerIds) {
     String? best;

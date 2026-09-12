@@ -6,6 +6,7 @@ import 'package:hermes_shared/hermes_shared.dart' hide ProxyClient;
 import 'package:provider/provider.dart';
 
 import '../models/book.dart' hide FileType;
+import '../models/book.dart' as models;
 import '../providers/library_provider.dart';
 import '../providers/local_library_provider.dart';
 import '../providers/server_provider.dart';
@@ -41,6 +42,7 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
   bool _reloading = false;
   String? _error;
   List<LocalLibrarySection> _sections = const [];
+  Map<String, String> _encodingLabels = const {};
 
   @override
   void initState() {
@@ -124,6 +126,14 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
       }
 
       if (!mounted) return;
+      // Refresh the per-book encoding labels alongside the listing.
+      final labels = <String, String>{};
+      await Future.wait(
+        sections.expand((s) => s.books).map((book) async {
+          labels[book.id] = await _provider.encodingLabelOf(book);
+        }),
+      );
+      _encodingLabels = labels;
       setState(() {
         _sections = sections;
         _connecting = false;
@@ -139,9 +149,9 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
     }
   }
 
-  Future<void> _openBook(BuildContext context, Book book) async {
+  Future<void> _openBook(BuildContext context, Book book, [BookContent? preloaded]) async {
     try {
-      final content = await _provider.open(book);
+      final content = preloaded ?? await _provider.open(book);
       if (content == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -161,6 +171,55 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('打开失败：$e')));
       }
+    }
+  }
+
+  /// Whether [book] is a text format where a charset switch helps.
+  bool _isText(Book book) {
+    final t = book.fileType;
+    return t == null ||
+        t == models.FileType.plainText ||
+        t == models.FileType.html ||
+        t == models.FileType.mobi ||
+        t == models.FileType.json ||
+        t == models.FileType.unknown;
+  }
+
+  static const Map<String, String> _encodingChoices = {
+    'auto': '自动',
+    'utf-8': 'UTF-8',
+    'gbk': 'GBK',
+  };
+
+  Future<void> _setEncoding(BuildContext context, Book book) async {
+    final chosen = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('文本编码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final e in _encodingChoices.entries)
+              ListTile(
+                title: Text(e.value),
+                subtitle: Text(e.key),
+                onTap: () => Navigator.pop(ctx, e.key),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null) return;
+    // Apply + persist, then open the (re-decoded) book with the new encoding.
+    final content = await _provider.readCached(book, encoding: chosen);
+    _encodingLabels[book.id] = chosen;
+    if (mounted) setState(() {});
+    if (content != null) {
+      await _openBook(context, book, content);
+    } else {
+      await _provider.setEncoding(book, chosen);
+      final c = await _provider.open(book);
+      await _openBook(context, book, c);
     }
   }
 
@@ -386,6 +445,8 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
                           onDelete: section.isLocal ? () => _delete(context, book) : null,
                           onForward: section.isLocal ? () => _forward(context, book) : null,
                           onRemoveCache: section.isLocal ? null : () => _removeCache(context, book),
+                          onEncoding: _isText(book) ? () => _setEncoding(context, book) : null,
+                          encodingLabel: _encodingLabels[book.id],
                         );
                       },
                     ),
@@ -454,6 +515,8 @@ class _BookCard extends StatelessWidget {
     this.onDelete,
     this.onForward,
     this.onRemoveCache,
+    this.onEncoding,
+    this.encodingLabel,
   });
   final Book book;
   final bool isLocal;
@@ -463,6 +526,8 @@ class _BookCard extends StatelessWidget {
   final VoidCallback? onDelete;
   final VoidCallback? onForward;
   final VoidCallback? onRemoveCache;
+  final VoidCallback? onEncoding;
+  final String? encodingLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -512,6 +577,21 @@ class _BookCard extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
+                if (onEncoding != null) ...[
+                  if (encodingLabel != null && encodingLabel != 'auto')
+                    Padding(
+                      padding: const EdgeInsets.only(right: 2),
+                      child: Text(
+                        encodingLabel!,
+                        style: const TextStyle(fontSize: 11, color: Colors.orange),
+                      ),
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.translate, size: 18),
+                    tooltip: '切换编码',
+                    onPressed: onEncoding,
+                  ),
+                ],
                 if (onForward != null)
                   IconButton(
                     icon: const Icon(Icons.forward, size: 18),

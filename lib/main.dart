@@ -400,7 +400,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final servers = await proxyClient.fetchServersDI();
         print('[AUTO] Connected, got ${servers.length} servers');
         await _onConnected(
-          'wss://${globalConfig.config.proxyWsUrl.split('://').last.split('/').first}',
+          globalConfig.config.proxyWsUrl,
           globalConfig.config.proxyAuthToken,
           servers,
         );
@@ -456,34 +456,27 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _onConnected(String proxyUrl, String token, List<dynamic> servers) async {
-      print('[ONCONNECTED] START proxyUrl=$proxyUrl servers=${servers.length}');
+  Future<void> _onConnected(String rawWsUrl, String token, List<dynamic> servers) async {
+      print('[ONCONNECTED] START wsUrl=$rawWsUrl servers=${servers.length}');
       final globalConfig = context.read<GlobalConfigProvider>();
-    
-      // proxyUrl from dialog is the stripped ws_url (e.g. wss://host or wss://host:port)
-      // Convert back to https URL for storage in GlobalConfig
-      final wsUri = Uri.parse(proxyUrl);
-      final httpsScheme = 'https';
-      final host = wsUri.host;
-      final port = wsUri.port;
-      // Store https URL (without port if default 443)
-      String baseUrl;
-      if (port > 0 && port != 443) {
-        baseUrl = '$httpsScheme://$host:$port';
-      } else {
-        baseUrl = '$httpsScheme://$host';
-      }
-    
-      // Recompute wsUrl from the corrected proxyUrl
-      final config = GlobalConfig(
+
+      // rawWsUrl is the full WebSocket URL from the scanned QR (e.g.
+      // ws://111.228.38.128:8649/ws?token=xxx). Store it verbatim so the
+      // exact scheme (ws/wss) and path are preserved for the connection.
+      final wsUri = Uri.parse(rawWsUrl);
+      final adminScheme = wsUri.scheme == 'wss' ? 'https' : 'http';
+      final adminPort = wsUri.hasPort ? ':${wsUri.port}' : '';
+      final adminBase = '$adminScheme://${wsUri.host}$adminPort';
+
+      final config = globalConfig.config.copyWith(
         mode: ConnectionMode.hermesProxy,
-        proxyUrl: baseUrl,
+        proxyUrl: adminBase,
         proxyAuthToken: token,
-        proxyWsPort: port > 0 ? port : 8649,
-        proxyAdminPort: 8650,
+        proxyWsUrl: rawWsUrl,
+        proxyWsPort: wsUri.hasPort ? wsUri.port : 8649,
+        proxyAdminPort: wsUri.hasPort ? wsUri.port : 8650,
       );
-      final wsUrl = config.proxyWsUrl;
-    
+
       globalConfig.updateConfig(config);
 
       final serverProvider = context.read<ServerProvider>();
@@ -491,7 +484,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       // Create proxy client and wire DI session updates to SessionProvider
       final proxyClient = reader_proxy.ProxyClient(
-        proxyUrl: wsUrl,
+        proxyUrl: rawWsUrl,
         authToken: token,
       );
       final sessionProvider = context.read<SessionProvider>();
@@ -645,10 +638,28 @@ class _HomeScreenState extends State<HomeScreen> {
                 }
                 final token = tokenController.text.trim();
                 final provider = context.read<GlobalConfigProvider>();
+                // Allow entering a full ws:// or wss:// URL directly; otherwise
+                // treat the input as an http(s) admin base URL (legacy behaviour).
+                String? wsUrl;
+                String adminUrl = url;
+                if (url.startsWith('ws://') || url.startsWith('wss://')) {
+                  wsUrl = url;
+                  final u = Uri.parse(url);
+                  final scheme = u.scheme == 'wss' ? 'https' : 'http';
+                  final port = u.hasPort ? ':${u.port}' : '';
+                  adminUrl = '$scheme://${u.host}$port';
+                }
                 provider.updateConfig(GlobalConfig(
                   mode: ConnectionMode.hermesProxy,
-                  proxyUrl: url,
+                  proxyUrl: adminUrl,
                   proxyAuthToken: token,
+                  proxyWsUrl: wsUrl,
+                  proxyWsPort: wsUrl != null
+                      ? (Uri.parse(wsUrl).hasPort ? Uri.parse(wsUrl).port : 8649)
+                      : 8649,
+                  proxyAdminPort: Uri.parse(adminUrl).hasPort
+                      ? Uri.parse(adminUrl).port
+                      : 8650,
                 ));
                 setState(() {
                   _sessionLimit = limitController.text.trim();
@@ -928,10 +939,28 @@ class _HomeScreenState extends State<HomeScreen> {
                 }
                 final token = tokenController.text.trim();
                 final provider = context.read<GlobalConfigProvider>();
+                // Allow entering a full ws:// or wss:// URL directly; otherwise
+                // treat the input as an http(s) admin base URL (legacy behaviour).
+                String? wsUrl;
+                String adminUrl = url;
+                if (url.startsWith('ws://') || url.startsWith('wss://')) {
+                  wsUrl = url;
+                  final u = Uri.parse(url);
+                  final scheme = u.scheme == 'wss' ? 'https' : 'http';
+                  final port = u.hasPort ? ':${u.port}' : '';
+                  adminUrl = '$scheme://${u.host}$port';
+                }
                 provider.updateConfig(GlobalConfig(
                   mode: ConnectionMode.hermesProxy,
-                  proxyUrl: url,
+                  proxyUrl: adminUrl,
                   proxyAuthToken: token,
+                  proxyWsUrl: wsUrl,
+                  proxyWsPort: wsUrl != null
+                      ? (Uri.parse(wsUrl).hasPort ? Uri.parse(wsUrl).port : 8649)
+                      : 8649,
+                  proxyAdminPort: Uri.parse(adminUrl).hasPort
+                      ? Uri.parse(adminUrl).port
+                      : 8650,
                 ));
                 setState(() {
                   _sessionLimit = limitController.text.trim();
