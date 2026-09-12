@@ -12,6 +12,7 @@ import 'reader/providers/global_config_provider.dart';
 import 'reader/providers/server_provider.dart';
 import 'reader/services/library_service.dart';
 import 'reader/services/reader_config_storage.dart';
+import 'reader/services/external_library_dir.dart';
 import 'reader/services/tts_service.dart';
 import 'reader/services/local_tts_source.dart';
 import 'reader/services/server_tts_source.dart';
@@ -124,7 +125,21 @@ class _StartupScreenState extends State<StartupScreen> {
   /// Restores the saved reader settings before the first page is shown.
   Future<void> _restoreReaderConfig() async {
     try {
-      final config = await ReaderConfigStorage().load();
+      final fromPrefs = await ReaderConfigStorage().load();
+      var config = fromPrefs;
+      // Mirror the portable config into the external hermes-reader folder (and
+      // honour a user-edited hermes-reader/config.json if present) so settings
+      // live with the books and survive an uninstall.
+      try {
+        if (await ExternalLibraryDir.ensurePermission()) {
+          final ext = await ExternalLibraryDir.ensure();
+          final external = await LocalLibraryConfig(ext.root).readReaderConfig();
+          if (external != null) config = external;
+          await LocalLibraryConfig(ext.root).writeReaderConfig(config);
+        }
+      } catch (e) {
+        debugPrint('external config sync skipped: $e');
+      }
       if (!mounted) return;
       context.read<ReaderProvider>().updateConfig(config);
     } catch (e) {

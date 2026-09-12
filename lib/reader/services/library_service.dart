@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:path_provider/path_provider.dart';
+import 'external_library_dir.dart';
 
 import '../models/book.dart';
 import 'book_text_extractor.dart';
@@ -84,8 +84,9 @@ class LibraryService {
   final FileBodyDecoder _bodyDecoder;
 
   /// Where downloaded files land. Injectable so tests do not need platform
-  /// channels, and so the storage policy lives in one place: the app-private
-  /// documents directory, never external storage.
+  /// channels, and so the storage policy lives in one place: the user-visible
+  /// `hermes-reader/books` folder on external storage (see [ExternalLibraryDir]),
+  /// which survives an app uninstall.
   final BookStorage? storage;
 
   BookStorage get _storage => storage ?? const BookStorage();
@@ -196,9 +197,9 @@ class LibraryService {
 
     final text = await _extractOffThread(validated, type);
 
-    // Persist into app-private storage — no external storage permission is
-    // requested anywhere in this feature. Done outside the try above so a disk
-    // error is not reported as a network error.
+    // Persist into the external `hermes-reader/books` folder (see
+    // [ExternalLibraryDir]) so the download survives an app uninstall. Done
+    // outside the try above so a disk error is not reported as a network error.
     await _storage.save(book, validated);
 
     return BookContent(
@@ -373,9 +374,10 @@ class LibraryService {
 
 /// Persists downloaded books in the app's private documents directory.
 ///
-/// Deliberately never touches external storage: the reader never asks for
-/// READ/WRITE_EXTERNAL_STORAGE, so books stay inside the app sandbox and are
-/// removed with the app.
+/// Cached books now live in the user-visible `hermes-reader/books` folder on
+/// the device's external storage (see [ExternalLibraryDir]), so downloads
+/// survive an app uninstall. The folder is created on demand; if external
+/// storage is unavailable the caller surfaces the error.
 class BookStorage {
   const BookStorage();
 
@@ -480,14 +482,10 @@ class BookStorage {
   }
 
   Future<File> _file(Book book) async {
-    final dir = await getApplicationDocumentsDirectory();
-    final booksDir = Directory('${dir.path}/books');
-    if (!await booksDir.exists()) {
-      await booksDir.create(recursive: true);
-    }
+    final dir = await ExternalLibraryDir.booksDirectory();
     final name = const LibrarySandbox()
         .localFileName(book.serverId, book.relativePath);
-    return File('${booksDir.path}/$name');
+    return File('${dir.path}/$name');
   }
 
   Future<File> _metaFile(Book book) async {

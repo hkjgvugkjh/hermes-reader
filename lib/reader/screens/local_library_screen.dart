@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:hermes_shared/hermes_shared.dart' hide ProxyClient;
 import 'package:provider/provider.dart';
+
+import '../services/external_library_dir.dart';
 
 import '../models/book.dart';
 import '../providers/library_provider.dart';
@@ -10,14 +14,17 @@ import '../providers/server_provider.dart';
 import '../services/proxy_client.dart';
 import 'book_reader_screen.dart';
 
-/// Screen for the proxy-hosted local library: list files downloaded from any
-/// server in one place, open/read them, upload new files, rename, delete on the
-/// server, and forward a file to another remote server's library.
+/// Screen for the device-local library: list files stored on the phone,
+/// open/read them, upload new files, rename, delete, and forward a file to a
+/// remote server's library. Everything except [forward] is pure local
+/// filesystem access — no proxy and no network are required to browse, open,
+/// upload, rename or delete.
 class LocalLibraryScreen extends StatefulWidget {
   const LocalLibraryScreen({super.key, required this.proxyClient});
 
-  /// A connected (or connectable) proxy [ProxyClient]. The local library is a
-  /// proxy feature, so requests go over this client with the reserved server id.
+  /// A connectable proxy [ProxyClient]. Only used for [forward], which pushes a
+  /// local file to a remote server through the proxy; the rest of the library is
+  /// device-local and never touches this client.
   final ProxyClient proxyClient;
 
   @override
@@ -25,32 +32,47 @@ class LocalLibraryScreen extends StatefulWidget {
 }
 
 class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
-  late final LocalLibraryClient _client;
+  late final Directory _rootDir;
   late final LocalLibraryProvider _provider;
   bool _connecting = true;
-  String? _connectError;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _client = LocalLibraryClient(widget.proxyClient.sendRequest);
-    _provider = LocalLibraryProvider(client: _client);
     _init();
   }
 
   Future<void> _init() async {
+    final granted = await ExternalLibraryDir.ensurePermission();
+    if (!granted) {
+      if (mounted) {
+        setState(() {
+          _connecting = false;
+          _error = '需要「所有文件访问」权限，才能在手机存储中创建 hermes-reader 目录';
+        });
+      }
+      return;
+    }
+    final ext = await ExternalLibraryDir.ensure();
+    _rootDir = await ext.library;
+    _provider = LocalLibraryProvider(
+      rootDir: _rootDir,
+      forwardClient: LocalLibraryClient(widget.proxyClient.sendRequest),
+    );
+    if (!mounted) return;
     try {
-      await widget.proxyClient.connect();
+      await _provider.refresh();
     } catch (e) {
+      // refresh() swallows listing errors into _provider.error; this catch is
+      // only for unexpected transport failures so we never spin forever.
       if (!mounted) return;
       setState(() {
         _connecting = false;
-        _connectError = '连接代理失败：$e';
+        _error = '加载失败：$e';
       });
       return;
     }
-    if (!mounted) return;
-    await _provider.refresh();
     if (!mounted) return;
     setState(() => _connecting = false);
   }
@@ -197,6 +219,8 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
     );
     if (target == null) return;
     try {
+      // Forwarding is the only network operation: connect the proxy on demand.
+      await widget.proxyClient.connect();
       await _provider.forward(book.relativePath, target, 'library');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -237,11 +261,11 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
           if (_connecting) {
             return const Center(child: CircularProgressIndicator());
           }
-          if (_connectError != null) {
+          if (_error != null) {
             return Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
-                child: Text(_connectError!, textAlign: TextAlign.center),
+                child: Text(_error!, textAlign: TextAlign.center),
               ),
             );
           }
