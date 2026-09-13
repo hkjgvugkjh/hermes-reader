@@ -27,11 +27,9 @@ dependencies:
   file_picker: ^8.1.0
   permission_handler: ^11.3.1
 
-  # shared code
+  # shared code (TODO: restore git ref once hermes_shared with TTS client is published)
   hermes_shared:
-    git:
-      url: https://github.com/hkjgvugkjh/hermes-shared.git
-      ref: main
+    path: ../hermes-shared
   archive: ^4.0.9
   gbk_codec: ^0.4.0
   sherpa_onnx: ^1.13.8
