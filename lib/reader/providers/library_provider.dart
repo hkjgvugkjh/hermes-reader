@@ -10,6 +10,9 @@ import '../services/reading_progress_service.dart';
 import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
 import '../services/chapter_detector.dart';
+import '../services/annotation_store.dart';
+import '../services/comment_sync_service.dart';
+import '../models/reader_annotations.dart';
 
 /// Runs chapter detection off the UI thread (see [ChapterDetector.detect]).
 /// Must be a top-level function so it can be passed to [compute].
@@ -165,12 +168,18 @@ class ReaderProvider extends ChangeNotifier {
     ReadingProgressService? progressService,
     NarrationProgressService? narrationProgressService,
     ReaderConfigStorage? configStorage,
+    AnnotationStore? annotationStore,
+    CommentSync? commentSync,
+    String? deviceId,
   })  : _config = config ?? const ReaderConfig(),
         _paginator = paginator,
         _progressService = progressService ?? ReadingProgressService(),
         _narrationProgress =
             narrationProgressService ?? NarrationProgressService(),
-        _configStorage = configStorage;
+        _configStorage = configStorage,
+        _annotations = annotationStore ?? AnnotationStore(),
+        _commentSync = commentSync,
+        _deviceId = deviceId ?? 'device';
 
   ReaderConfig _config;
   ReaderConfig get config => _config;
@@ -206,6 +215,9 @@ class ReaderProvider extends ChangeNotifier {
   /// The open book's content, kept whole so page breaks survive re-pagination.
   BookContent? _content;
   int _lastPageChars = 700;
+
+  /// Exposes the raw content so the screen can re-flow it with real metrics.
+  BookContent? get content => _content;
 
   final List<BookPage> _pages = [];
   List<BookPage> get pages => List.unmodifiable(_pages);
@@ -303,6 +315,8 @@ class ReaderProvider extends ChangeNotifier {
     // Build the table of contents off the UI thread; the jump dialog falls
     // back to plain page-jumping until (and unless) headings are found.
     _detectChapters();
+    // Load local bookmarks/notes and any shared comments for this book.
+    await loadAnnotations();
   }
 
   /// Detects chapter headings on a background isolate and publishes them.
@@ -382,6 +396,146 @@ class ReaderProvider extends ChangeNotifier {
   void goToPage(int index) {
     if (_pages.isEmpty) return;
     _pageIndex = index.clamp(0, _pages.length - 1);
+    notifyListeners();
+  }
+
+  // ---- Annotations: bookmarks, notes, shared comments ----
+
+  final AnnotationStore _annotations;
+  CommentSync? _commentSync;
+  final String _deviceId;
+
+  List<Bookmark> _bookmarks = const [];
+  List<Bookmark> get bookmarks => List.unmodifiable(_bookmarks);
+
+  List<Note> _notes = const [];
+  List<Note> get notes => List.unmodifiable(_notes);
+
+  List<SharedComment> _sharedComments = const [];
+  List<SharedComment> get sharedComments => List.unmodifiable(_sharedComments);
+
+  /// Whether a shared-comment backend is wired (used by the UI to show the
+  /// "publish" action on local notes).
+  CommentSync? get commentSync => _commentSync;
+
+  /// Whether the current page position has a bookmark.
+  bool get isBookmarkedAtCurrentPage {
+    final offset = currentPage?.startOffset ?? -1;
+    return _bookmarks.any((b) => b.offset == offset);
+  }
+
+  /// Notes overlapping the current page's text range.
+  List<Note> notesOnCurrentPage(int pageStart, int pageEnd) =>
+      _notes.where((n) => n.endOffset > pageStart && n.startOffset < pageEnd).toList();
+
+  /// Loads local bookmarks/notes for the open book and (when a sync backend is
+  /// wired) pulls shared comments. Call after [openBook].
+  Future<void> loadAnnotations() async {
+    if (_book == null) return;
+    _bookmarks = await _annotations.loadBookmarks(_book!.id);
+    _notes = await _annotations.loadNotes(_book!.id);
+    if (_commentSync != null) {
+      _sharedComments = await _commentSync!.pull(_book!.id);
+    }
+    notifyListeners();
+  }
+
+  /// Adds or removes a bookmark at the current page's start offset.
+  Future<void> toggleBookmark({String? label}) async {
+    if (_book == null) return;
+    final offset = currentPage?.startOffset ?? 0;
+    if (_bookmarks.any((b) => b.offset == offset)) {
+      await _annotations.removeBookmarkAt(_book!.id, offset);
+    } else {
+      await _annotations.addBookmark(Bookmark(
+        bookId: _book!.id,
+        offset: offset,
+        pageIndex: _pageIndex,
+        label: label,
+      ));
+    }
+    _bookmarks = await _annotations.loadBookmarks(_book!.id);
+    notifyListeners();
+  }
+
+  /// Saves a highlight+comment anchored to [startOffset..endOffset].
+  Future<void> saveNote({
+    required int startOffset,
+    required int endOffset,
+    required String quotedText,
+    String? comment,
+    int color = 0xFFFFEB3B,
+  }) async {
+    if (_book == null) return;
+    final note = Note(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      bookId: _book!.id,
+      startOffset: startOffset,
+      endOffset: endOffset,
+      quotedText: quotedText,
+      comment: comment,
+      color: color,
+    );
+    await _annotations.saveNote(note);
+    _notes = await _annotations.loadNotes(_book!.id);
+    notifyListeners();
+  }
+
+  Future<void> removeNote(String id) async {
+    if (_book == null) return;
+    await _annotations.removeNote(_book!.id, id);
+    _notes = await _annotations.loadNotes(_book!.id);
+    notifyListeners();
+  }
+
+  /// Publishes a local note to the shared layer, returning whether it succeeded.
+  Future<bool> publishComment(Note note, {String author = 'me'}) async {
+    if (_commentSync == null || _book == null) return false;
+    final shared = SharedComment(
+      id: note.id,
+      bookId: _book!.id,
+      deviceId: _deviceId,
+      author: author,
+      startOffset: note.startOffset,
+      endOffset: note.endOffset,
+      quotedText: note.quotedText,
+      comment: note.comment ?? '',
+    );
+    final ok = await _commentSync!.push(shared);
+    if (ok) {
+      _sharedComments = await _commentSync!.pull(_book!.id);
+      notifyListeners();
+    }
+    return ok;
+  }
+
+  /// Re-pulls shared comments from the sync backend (e.g. after a peer pushed).
+  Future<void> refreshSharedComments() async {
+    if (_commentSync == null || _book == null) return;
+    _sharedComments = await _commentSync!.pull(_book!.id);
+    notifyListeners();
+  }
+
+  /// Injects the shared-comment backend. The reader screen wires this up once a
+  /// server connection is available (the [CommentSync] impl needs the active
+  /// transport), so [ReaderProvider] itself stays transport-agnostic.
+  void setCommentSync(CommentSync? sync) {
+    _commentSync = sync;
+    if (sync != null && _book != null) {
+      refreshSharedComments();
+    }
+  }
+
+  /// Replaces the current page layout with pre-computed pages (e.g. produced by
+  /// the screen using real screen/font metrics via [PaginatorService.paginateWithLayout]).
+  void setPages(List<BookPage> pages) {
+    if (pages.isEmpty) return;
+    _pages
+      ..clear()
+      ..addAll(pages);
+    if (_pageIndex >= _pages.length) {
+      _pageIndex = _pages.length - 1;
+    }
     notifyListeners();
   }
 

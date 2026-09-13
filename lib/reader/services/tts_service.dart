@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../models/reader_config.dart';
+import 'proxy_client.dart';
 
 /// How the current utterance is being produced.
 enum SpeechEngine {
@@ -61,6 +62,10 @@ abstract class SpeechSource {
   /// Optional: selects the backend server for proxy-tunneled server TTS.
   /// Only [ServerTtsSource] uses this; others ignore it.
   void setServerId(String? serverId) {}
+
+  /// Optional: refreshes the proxy client for proxy-tunneled server TTS without
+  /// recreating the source. Only [ServerTtsSource] uses this; others ignore it.
+  void setProxyClient(ProxyClient? client) {}
 }
 
 /// Chooses among the available engines.
@@ -156,6 +161,10 @@ class TtsService {
   /// Tells the server engine which backend to forward to (proxy mode). The
   /// reader screen calls this before [speak] with the book's serverId.
   void setServerId(String? serverId) => _server.setServerId(serverId);
+
+  /// Update the proxy client used by the server engine without recreating the
+  /// service, so narration keeps running across session reconnects.
+  void setProxyClient(ProxyClient? client) => _server.setProxyClient(client);
 
   Future<void> _applyRate() async {
     await _local.setRate(_rate);

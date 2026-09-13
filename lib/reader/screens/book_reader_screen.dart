@@ -9,7 +9,11 @@ import '../services/library_cache_index.dart';
 import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
 import '../services/pdf_image_decoder.dart';
+import '../services/paginator_service.dart';
 import '../services/tts_service.dart';
+import '../providers/server_provider.dart';
+import '../services/comment_sync_service.dart';
+import '../models/reader_annotations.dart';
 
 /// Full-screen reader with pagination and read-aloud controls.
 class BookReaderScreen extends StatefulWidget {
@@ -41,6 +45,17 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     'gbk': 'GBK',
   };
 
+  /// Cached key of the last layout pass so we only re-flow pages when the
+  /// font/size or available area actually changes.
+  String? _layoutKey;
+
+  /// Text the user has highlighted on the current page, pending a note.
+  _TextSelection? _pendingSelection;
+
+  /// Comment-sync mode that has already been applied, so we only rebuild the
+  /// sync channels when the user actually changes the setting.
+  CommentSyncMode? _appliedCommentSyncMode;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -48,6 +63,30 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     if (tts != _tts) {
       _tts = tts;
       tts?.setProgressHandler(_onNarrationProgress);
+    }
+    final reader = context.read<ReaderProvider>();
+    final mode = reader.config.commentSyncMode;
+    if (reader.commentSync == null || _appliedCommentSyncMode != mode) {
+      final server = context.read<ServerProvider>();
+      final channels = <CommentSync>[];
+      if (mode != CommentSyncMode.torrent && server.activeServer != null) {
+        try {
+          channels.add(ServerCommentSync(server.getClient(server.activeServer!)));
+        } catch (_) {
+          // Server unreachable — fall back to whatever else is enabled.
+        }
+      }
+      if (mode != CommentSyncMode.server) {
+        channels.add(TorrentCommentSync());
+      }
+      if (channels.isNotEmpty) {
+        _appliedCommentSyncMode = mode;
+        reader.setCommentSync(
+          channels.length == 1 ? channels.first : CompositeCommentSync(channels),
+        );
+      } else {
+        _appliedCommentSyncMode = null;
+      }
     }
     _loadEncodingLabel();
   }
@@ -237,6 +276,13 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
         final narratable = _canNarrate(book);
 
         return Scaffold(
+          floatingActionButton: _pendingSelection == null
+              ? null
+              : FloatingActionButton.extended(
+                  onPressed: () => _showNoteEditor(_pendingSelection!),
+                  icon: const Icon(Icons.edit_note),
+                  label: const Text('批注选区'),
+                ),
           appBar: _controlsVisible
               ? AppBar(
                   title: Text(book?.title ?? '阅读'),
@@ -267,6 +313,35 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       tooltip: '阅读设置',
                       onPressed: () => _showSettings(context, reader),
                     ),
+                    IconButton(
+                      icon: Icon(
+                        reader.isBookmarkedAtCurrentPage
+                            ? Icons.bookmark
+                            : Icons.bookmark_border,
+                        color: reader.isBookmarkedAtCurrentPage
+                            ? Colors.amber
+                            : null,
+                      ),
+                      tooltip: '书签',
+                      onPressed: () async {
+                        await reader.toggleBookmark();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(reader.isBookmarkedAtCurrentPage
+                                  ? '已添加书签'
+                                  : '已移除书签'),
+                              duration: const Duration(seconds: 1),
+                            ),
+                          );
+                        }
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.comment_outlined),
+                      tooltip: '书评',
+                      onPressed: () => _showComments(),
+                    ),
                   ],
                 )
               : null,
@@ -279,6 +354,34 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
+                          // Re-flow pages to the real screen using exact font
+                          // metrics, so each page fits without scrolling.
+                          final content = reader.content;
+                          if (content != null && constraints.maxHeight > 0) {
+                            final fontScale = reader.config.fontScale;
+                            final style = TextStyle(
+                              fontSize: 17 * fontScale,
+                              height: 1.7 * fontScale.clamp(1.0, 1.3),
+                            );
+                            final key =
+                                '${content.text.length}:$fontScale:'
+                                '${constraints.maxWidth.toInt()}:'
+                                '${constraints.maxHeight.toInt()}';
+                            if (key != _layoutKey) {
+                              _layoutKey = key;
+                              final pages = PaginatorService()
+                                  .paginateWithLayout(
+                                content.text,
+                                style: style,
+                                maxWidth: constraints.maxWidth - 40,
+                                maxHeight: constraints.maxHeight - 32,
+                                breakOffsets: content.pageBreaks,
+                              );
+                              // Apply after this frame to avoid notify-during-build.
+                              WidgetsBinding.instance
+                                  .addPostFrameCallback((_) => reader.setPages(pages));
+                            }
+                          }
                           return GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onTapUp: (details) {
@@ -305,7 +408,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               }
                             },
                             child: SafeArea(
-                              child: _buildPageBody(context, reader),
+                              child: _buildPageBody(context, reader,
+                                  onSelection: _onPageSelection),
                             ),
                           );
                         },
@@ -388,6 +492,23 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       value: config.autoTurnPage,
                       onChanged: (value) =>
                           apply(config.copyWith(autoTurnPage: value)),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('共享评论通道',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                            fontWeight: FontWeight.bold)),
+                    ...CommentSyncMode.values.map(
+                      (mode) => RadioListTile<CommentSyncMode>(
+                        title: Text(mode.label),
+                        value: mode,
+                        groupValue: config.commentSyncMode,
+                        onChanged: (value) {
+                          if (value == null) return;
+                          apply(config.copyWith(commentSyncMode: value));
+                        },
+                      ),
                     ),
                     const SizedBox(height: 8),
                     Text('每页字数：${config.charsPerPage}',
@@ -527,6 +648,109 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       ),
     );
   }
+
+  void _onPageSelection(int start, int end, String text) {
+    setState(() {
+      _pendingSelection =
+          (text.isEmpty || end <= start) ? null : _TextSelection(start, end, text);
+    });
+  }
+
+  void _showNoteEditor(_TextSelection sel) {
+    final reader = context.read<ReaderProvider>();
+    final controller = TextEditingController();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          left: 16,
+          right: 16,
+          top: 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('选中文本', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.yellow.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(sel.text, maxLines: 4, overflow: TextOverflow.ellipsis),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(labelText: '笔记 / 评论', border: OutlineInputBorder()),
+              maxLines: 3,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('取消'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () async {
+                    await reader.saveNote(
+                      startOffset: sel.start,
+                      endOffset: sel.end,
+                      quotedText: sel.text,
+                      comment: controller.text.trim().isEmpty
+                          ? null
+                          : controller.text.trim(),
+                    );
+                    if (mounted) Navigator.pop(ctx);
+                    setState(() => _pendingSelection = null);
+                  },
+                  child: const Text('保存笔记'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showComments() {
+    final reader = context.read<ReaderProvider>();
+    final page = reader.currentPage;
+    final pageStart = page?.startOffset ?? 0;
+    final pageEnd = pageStart + (page?.content.length ?? 0);
+    final notesHere = reader.notesOnCurrentPage(pageStart, pageEnd);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        maxChildSize: 0.92,
+        minChildSize: 0.4,
+        expand: false,
+        builder: (c, scroll) => _CommentsSheet(
+          reader: reader,
+          notesHere: notesHere,
+          onPublish: (note) async {
+            final ok = await reader.publishComment(note);
+            if (mounted && !ok && ctx.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('发布失败：未连接到共享服务器')),
+              );
+            }
+          },
+          onRemoveNote: (id) => reader.removeNote(id),
+        ),
+      ),
+    );
+  }
 }
 
 class _FallbackBanner extends StatelessWidget {
@@ -559,7 +783,11 @@ class _FallbackBanner extends StatelessWidget {
 
   /// Renders the current page's text with any inline images interleaved. The
   /// body scrolls so a picture taller than the screen stays reachable.
-  Widget _buildPageBody(BuildContext context, ReaderProvider reader) {
+  Widget _buildPageBody(
+    BuildContext context,
+    ReaderProvider reader, {
+    void Function(int start, int end, String text)? onSelection,
+  }) {
     final page = reader.currentPage;
     if (page == null) return const SizedBox.shrink();
 
@@ -567,7 +795,7 @@ class _FallbackBanner extends StatelessWidget {
     final fontScale = reader.config.fontScale;
     final style = TextStyle(
       fontSize: 17 * fontScale,
-      height: 1.7 * fontScale.clamp(1.0, 1.3),
+      height: reader.config.lineHeightFactor,
     );
     final maxWidth = MediaQuery.of(context).size.width - 40;
 
@@ -577,7 +805,27 @@ class _FallbackBanner extends StatelessWidget {
     for (final m in imageMarkerRegex.allMatches(content)) {
       final text = content.substring(last, m.start);
       if (text.isNotEmpty) {
-        widgets.add(Text(text, style: style, textAlign: TextAlign.justify));
+        final base = last;
+        widgets.add(
+          SelectableText(
+            text,
+            style: style,
+            textAlign: TextAlign.justify,
+            onSelectionChanged: onSelection == null
+                ? null
+                : (sel, _) {
+                    if (!sel.isValid || sel.isCollapsed) {
+                      onSelection(page.startOffset + base, page.startOffset + base, '');
+                      return;
+                    }
+                    onSelection(
+                      page.startOffset + base + sel.start,
+                      page.startOffset + base + sel.end,
+                      text.substring(sel.start, sel.end),
+                    );
+                  },
+          ),
+        );
       }
       final index = int.tryParse(m.group(1)!);
       final img = index != null && index < images.length ? images[index] : null;
@@ -586,7 +834,27 @@ class _FallbackBanner extends StatelessWidget {
     }
     final tail = content.substring(last);
     if (tail.isNotEmpty) {
-      widgets.add(Text(tail, style: style, textAlign: TextAlign.justify));
+      final base = last;
+      widgets.add(
+        SelectableText(
+          tail,
+          style: style,
+          textAlign: TextAlign.justify,
+          onSelectionChanged: onSelection == null
+              ? null
+              : (sel, _) {
+                  if (!sel.isValid || sel.isCollapsed) {
+                    onSelection(page.startOffset + base, page.startOffset + base, '');
+                    return;
+                  }
+                  onSelection(
+                    page.startOffset + base + sel.start,
+                    page.startOffset + base + sel.end,
+                    tail.substring(sel.start, sel.end),
+                  );
+                },
+        ),
+      );
     }
 
     return SingleChildScrollView(
@@ -723,6 +991,186 @@ class _ReaderFooter extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _TextSelection {
+  final int start;
+  final int end;
+  final String text;
+  const _TextSelection(this.start, this.end, this.text);
+}
+
+class _CommentsSheet extends StatelessWidget {
+  final ReaderProvider reader;
+  final List<Note> notesHere;
+  final Future<void> Function(Note) onPublish;
+  final void Function(String) onRemoveNote;
+
+  const _CommentsSheet({
+    required this.reader,
+    required this.notesHere,
+    required this.onPublish,
+    required this.onRemoveNote,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final comments = reader.sharedComments;
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          const TabBar(
+            tabs: [
+              Tab(text: '本页笔记'),
+              Tab(text: '共享书评'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                ListView(
+                  padding: const EdgeInsets.all(12),
+                  children: [
+                    for (final n in notesHere)
+                      _NoteTile(
+                        note: n,
+                        onRemove: () => onRemoveNote(n.id),
+                        onPublish: () => onPublish(n),
+                        canPublish: reader.commentSync != null,
+                      ),
+                    if (notesHere.isEmpty)
+                      const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('本页还没有笔记，选中正文后点“批注选区”即可添加。'),
+                        ),
+                      ),
+                  ],
+                ),
+                ListView(
+                  padding: const EdgeInsets.all(12),
+                  children: [
+                    for (final c in comments) _CommentTile(comment: c),
+                    if (comments.isEmpty)
+                      const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('还没有共享书评。连接服务器后，其他人发布的评论会显示在这里。'),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoteTile extends StatelessWidget {
+  final Note note;
+  final VoidCallback onRemove;
+  final VoidCallback onPublish;
+  final bool canPublish;
+
+  const _NoteTile({
+    required this.note,
+    required this.onRemove,
+    required this.onPublish,
+    required this.canPublish,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: Colors.yellow.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(note.quotedText,
+                  maxLines: 3, overflow: TextOverflow.ellipsis),
+            ),
+            if (note.comment != null && note.comment!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(note.comment!),
+            ],
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: onRemove,
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('删除'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: canPublish ? onPublish : null,
+                  child: const Text('发布到共享'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CommentTile extends StatelessWidget {
+  final SharedComment comment;
+  const _CommentTile({required this.comment});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = comment.createdAt > 0
+        ? DateTime.fromMillisecondsSinceEpoch(comment.createdAt)
+            .toLocal()
+            .toString()
+            .substring(0, 16)
+        : '';
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (comment.quotedText.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(comment.quotedText,
+                    maxLines: 3, overflow: TextOverflow.ellipsis),
+              ),
+            if (comment.comment.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(comment.comment),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              '${comment.deviceId}${t.isNotEmpty ? ' · $t' : ''}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -27,6 +27,21 @@ enum TtsMode {
   final String label;
 }
 
+/// Which channel(s) shared comments are published to / pulled from.
+enum CommentSyncMode {
+  /// Only the hermes server file channel.
+  server('仅服务端'),
+
+  /// Only the (reserved) torrent / P2P channel.
+  torrent('仅 Torrent'),
+
+  /// Publish to and merge from both channels.
+  both('服务端 + Torrent 兼顾');
+
+  const CommentSyncMode(this.label);
+  final String label;
+}
+
 class ReaderConfig {
   // ---- privacy / safety limits -------------------------------------------
 
@@ -68,6 +83,10 @@ class ReaderConfig {
   /// Font scale multiplier in the reader.
   final double fontScale;
 
+  /// Line-height multiplier used both for rendering and for page-flow
+  /// measurement, so pre-computed pages fit the screen exactly.
+  final double lineHeightFactor;
+
   /// Automatically advance to the next page when narration finishes.
   final bool autoTurnPage;
 
@@ -77,6 +96,9 @@ class ReaderConfig {
   /// When true, left zone goes forward (next page); when false, goes back.
   final bool leftZoneForward;
 
+  /// Which channel(s) shared comments use.
+  final CommentSyncMode commentSyncMode;
+
   const ReaderConfig({
     this.ttsMode = TtsMode.auto,
     this.monitorInterval = const Duration(seconds: 60),
@@ -84,9 +106,11 @@ class ReaderConfig {
     this.speechRate = 0.5,
     this.charsPerPage = 700,
     this.fontScale = 1.0,
+    this.lineHeightFactor = 1.6,
     this.autoTurnPage = true,
     this.tapZoneMode = TapZoneMode.thirds,
     this.leftZoneForward = false,
+    this.commentSyncMode = CommentSyncMode.server,
   }) : assert(charsPerPage > 0, 'charsPerPage must be positive');
 
   ReaderConfig copyWith({
@@ -96,9 +120,11 @@ class ReaderConfig {
     double? speechRate,
     int? charsPerPage,
     double? fontScale,
+    double? lineHeightFactor,
     bool? autoTurnPage,
     TapZoneMode? tapZoneMode,
     bool? leftZoneForward,
+    CommentSyncMode? commentSyncMode,
   }) =>
       ReaderConfig(
         ttsMode: ttsMode ?? this.ttsMode,
@@ -107,9 +133,11 @@ class ReaderConfig {
         speechRate: speechRate ?? this.speechRate,
         charsPerPage: charsPerPage ?? this.charsPerPage,
         fontScale: fontScale ?? this.fontScale,
+        lineHeightFactor: lineHeightFactor ?? this.lineHeightFactor,
         autoTurnPage: autoTurnPage ?? this.autoTurnPage,
         tapZoneMode: tapZoneMode ?? this.tapZoneMode,
         leftZoneForward: leftZoneForward ?? this.leftZoneForward,
+        commentSyncMode: commentSyncMode ?? this.commentSyncMode,
       );
 
   Map<String, dynamic> toJson() => {
@@ -119,9 +147,11 @@ class ReaderConfig {
         'speechRate': speechRate,
         'charsPerPage': charsPerPage,
         'fontScale': fontScale,
+        'lineHeightFactor': lineHeightFactor,
         'autoTurnPage': autoTurnPage,
         'tapZoneMode': tapZoneMode.name,
         'leftZoneForward': leftZoneForward,
+        'commentSyncMode': commentSyncMode.name,
       };
 
   factory ReaderConfig.fromJson(Map<String, dynamic> json) => ReaderConfig(
@@ -136,11 +166,16 @@ class ReaderConfig {
         speechRate: (json['speechRate'] as num? ?? 0.5).toDouble(),
         charsPerPage: json['charsPerPage'] as int? ?? 700,
         fontScale: (json['fontScale'] as num? ?? 1.0).toDouble(),
+        lineHeightFactor: (json['lineHeightFactor'] as num? ?? 1.6).toDouble(),
         autoTurnPage: json['autoTurnPage'] as bool? ?? true,
         tapZoneMode: TapZoneMode.values.firstWhere(
           (e) => e.name == json['tapZoneMode'],
           orElse: () => TapZoneMode.thirds,
         ),
         leftZoneForward: json['leftZoneForward'] as bool? ?? false,
+        commentSyncMode: CommentSyncMode.values.firstWhere(
+          (e) => e.name == json['commentSyncMode'],
+          orElse: () => CommentSyncMode.server,
+        ),
       );
 }
