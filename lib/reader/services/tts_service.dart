@@ -7,8 +7,11 @@ enum SpeechEngine {
   /// Server-side synthesis via /api/hermes/tts/synthesize.
   server('Server TTS'),
 
-  /// On-device engine via flutter_tts.
-  local('Local TTS');
+  /// On-device engine via flutter_tts (system TTS).
+  local('Local TTS'),
+
+  /// On-device neural model bundled with the app (sherpa-onnx / Piper).
+  builtin('Builtin TTS');
 
   const SpeechEngine(this.label);
   final String label;
@@ -54,23 +57,36 @@ abstract class SpeechSource {
 
   /// Optional: only engines that expose word-level progress implement this.
   void setProgressHandler(NarrationProgressHandler? handler) {}
+
+  /// Optional: selects the backend server for proxy-tunneled server TTS.
+  /// Only [ServerTtsSource] uses this; others ignore it.
+  void setServerId(String? serverId) {}
 }
 
-/// Chooses between the server and on-device engines.
+/// Chooses among the available engines.
 ///
-/// In [TtsMode.auto] the server is preferred for voice quality, but any
-/// failure silently degrades to the local engine so narration never stalls
-/// just because the network did.
+/// Priority order for [TtsMode.auto] (per product decision: prefer on-device,
+/// fall back to the network only when nothing local works):
+///
+///   1. [SpeechEngine.local]  — system TTS (flutter_tts), when an engine exists.
+///   2. [SpeechEngine.builtin] — offline neural model bundled with the app.
+///   3. [SpeechEngine.server]  — /api/hermes/tts/synthesize via the proxy.
+///
+/// Any failure silently degrades to the next candidate so narration never
+/// stalls just because one engine is missing or the network is down.
 class TtsService {
   TtsService({
     required SpeechSource serverSource,
     required SpeechSource localSource,
+    SpeechSource? builtinSource,
     this.connectivityCheck,
   })  : _server = serverSource,
-        _local = localSource;
+        _local = localSource,
+        _builtin = builtinSource;
 
   final SpeechSource _server;
   final SpeechSource _local;
+  final SpeechSource? _builtin;
 
   /// Optional reachability probe. When it returns false the server engine is
   /// skipped entirely, avoiding a slow timeout before the fallback.
@@ -86,19 +102,30 @@ class TtsService {
   double get rate => _rate;
   String? get lastFallbackReason => _lastFallbackReason;
 
+  /// Per-engine availability, useful for UI diagnostics.
+  Future<Map<SpeechEngine, bool>> get engineAvailability async => {
+        SpeechEngine.local: await _local.isAvailable(),
+        SpeechEngine.builtin: _builtin == null
+            ? false
+            : await _builtin.isAvailable(),
+        SpeechEngine.server: await _server.isAvailable(),
+      };
+
   final _stateController = StreamController<TtsState>.broadcast();
 
   /// Emits as narration starts and stops, so the reader can drive page turns.
   Stream<TtsState> get stateStream => _stateController.stream;
 
-  /// Where the current utterance has got to. Only the local engine reports it.
+  /// Where the current utterance has got to. Only engines that report it do.
   void setProgressHandler(NarrationProgressHandler? handler) {
-    _local.setProgressHandler(handler == null
+    final cb = handler == null
         ? null
         : (offset) {
             _lastCharOffset = offset;
             handler(offset);
-          });
+          };
+    _local.setProgressHandler(cb);
+    _builtin?.setProgressHandler(cb);
   }
 
   int _lastCharOffset = 0;
@@ -118,13 +145,21 @@ class TtsService {
 
   Future<void> setMode(TtsMode mode) async {
     _mode = mode;
-    await _local.setRate(_rate);
-    await _server.setRate(_rate);
+    await _applyRate();
   }
 
   Future<void> setRate(double rate) async {
     _rate = rate.clamp(0.0, 1.0);
+    await _applyRate();
+  }
+
+  /// Tells the server engine which backend to forward to (proxy mode). The
+  /// reader screen calls this before [speak] with the book's serverId.
+  void setServerId(String? serverId) => _server.setServerId(serverId);
+
+  Future<void> _applyRate() async {
     await _local.setRate(_rate);
+    await _builtin?.setRate(_rate);
     await _server.setRate(_rate);
   }
 
@@ -142,8 +177,22 @@ class TtsService {
     switch (_mode) {
       case TtsMode.local:
         _lastFallbackReason = null;
-        await _speakWith(_local, text);
-        return const SpeakResult(engine: SpeechEngine.local);
+        try {
+          await _speakWith(_local, text);
+          return const SpeakResult(engine: SpeechEngine.local);
+        } catch (e) {
+          // local mode: also allow the bundled offline model as the last
+          // on-device resort before giving up.
+          final builtin = _builtin;
+          if (builtin != null) {
+            try {
+              await _speakWith(builtin, text);
+              return const SpeakResult(engine: SpeechEngine.builtin);
+            } catch (_) {}
+          }
+          _emit(TtsState.error);
+          rethrow;
+        }
 
       case TtsMode.server:
         _lastFallbackReason = null;
@@ -163,42 +212,62 @@ class TtsService {
   }
 
   Future<SpeakResult> _speakAuto(String text) async {
-    String? reason;
+    // On-device first: system TTS when an engine is present, else bundled model.
+    if (await _local.isAvailable()) {
+      try {
+        await _speakWith(_local, text);
+        _lastFallbackReason = null;
+        return const SpeakResult(engine: SpeechEngine.local);
+      } catch (e) {
+        _emit(TtsState.error);
+        // fall through to builtin/server
+      }
+    }
 
+    final builtin = _builtin;
+    if (builtin != null && await builtin.isAvailable()) {
+      try {
+        await _speakWith(builtin, text);
+        _lastFallbackReason = 'system TTS unavailable';
+        return SpeakResult(
+          engine: SpeechEngine.builtin,
+          fellBack: true,
+          fallbackReason: _lastFallbackReason,
+        );
+      } catch (e) {
+        _emit(TtsState.error);
+        // fall through to server
+      }
+    }
+
+    // Network last resort.
+    String? reason;
     if (connectivityCheck != null) {
       final reachable = await connectivityCheck!();
       if (!reachable) reason = 'offline';
     }
-
-    if (reason == null) {
-      if (!await _server.isAvailable()) {
-        reason = 'server TTS not configured';
-      }
+    if (reason == null && !await _server.isAvailable()) {
+      reason = 'server TTS not configured';
     }
 
     if (reason == null) {
       try {
         await _speakWith(_server, text);
-        _lastFallbackReason = null;
-        return const SpeakResult(engine: SpeechEngine.server);
+        _lastFallbackReason = _builtin != null
+            ? 'on-device engines unavailable'
+            : 'on-device engine unavailable';
+        return SpeakResult(
+          engine: SpeechEngine.server,
+          fellBack: true,
+          fallbackReason: _lastFallbackReason,
+        );
       } catch (e) {
         reason = 'server TTS failed: $e';
       }
     }
 
-    // Degrade to the on-device engine.
-    _lastFallbackReason = reason;
-    try {
-      await _speakWith(_local, text);
-      return SpeakResult(
-        engine: SpeechEngine.local,
-        fellBack: true,
-        fallbackReason: reason,
-      );
-    } catch (e) {
-      _emit(TtsState.error);
-      throw Exception('all TTS engines failed (last: $e)');
-    }
+    _emit(TtsState.error);
+    throw Exception('all TTS engines failed (last: $reason)');
   }
 
   Future<void> _speakWith(SpeechSource source, String text) async {
@@ -207,20 +276,21 @@ class TtsService {
   }
 
   Future<void> stop() async {
-    try {
-      await _server.stop();
-    } catch (_) {
-      // Stopping an already-stopped engine must not propagate.
+    for (final s in [_server, _local, _builtin]) {
+      if (s == null) continue;
+      try {
+        await s.stop();
+      } catch (_) {
+        // Stopping an already-stopped engine must not propagate.
+      }
     }
-    try {
-      await _local.stop();
-    } catch (_) {}
     _emit(TtsState.idle);
   }
 
   Future<void> dispose() async {
-    await _server.dispose();
-    await _local.dispose();
+    for (final s in [_server, _local, _builtin]) {
+      await s?.dispose();
+    }
     await _stateController.close();
   }
 }

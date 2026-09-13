@@ -179,4 +179,9 @@ class LocalTtsSource implements SpeechSource {
       (String text, int start, int end, String word) => handler(end),
     );
   }
+
+  @override
+  void setServerId(String? serverId) {
+    // Local engine does not use the proxy; ignored.
+  }
 }

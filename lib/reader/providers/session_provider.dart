@@ -25,6 +25,11 @@ class SessionProvider extends ChangeNotifier {
   bool get isInitialized => _initialized;
   bool get isMonitoring => _monitor?.isRunning ?? false;
 
+  /// The proxy client used for DI/WebSocket tunneling. Exposed so the TTS
+  /// service can forward /api/hermes/tts/synthesize through the same proxy
+  /// connection (and reuse the backend JWT the proxy obtained on mcu-login).
+  reader_proxy.ProxyClient? get proxyClient => _proxyClient;
+
   /// Current snapshot of every known session (latest poll per server).
   List<SessionSnapshot> get currentSessions =>
       _monitor?.currentSessions.values.toList() ?? const [];
@@ -104,7 +109,11 @@ class SessionProvider extends ChangeNotifier {
     String sessionId,
   ) async {
     final target = targetForServer(serverId);
-    final token = target?.authToken;
+    // Use the backend JWT the proxy obtained during mcu-login (returned in the
+    // ConnectAck) — NOT the reader's proxy auth token, which the backend
+    // rejects for /chat-run. Fall back to the target auth token only if the
+    // proxy didn't supply one.
+    final token = _proxyClient?.backendJWT(serverId) ?? target?.authToken;
     final profile = target?.profile ?? 'default';
 
     final headers = <String, String>{};
@@ -132,8 +141,12 @@ class SessionProvider extends ChangeNotifier {
       );
       await socket.opened.timeout(const Duration(seconds: 15));
 
-      // Connect to the /chat-run namespace with the Studio auth token.
-      socket.connectNamespace({'token': token ?? ''});
+      // Connect to the /chat-run namespace with the Studio auth token, and
+      // wait for the Engine.IO `40` CONNECT ack before emitting anything.
+      // Emitting before the ack is a protocol violation the server rejects
+      // with "Authentication failed".
+      await socket.connectNamespace({'token': token ?? ''})
+          .timeout(const Duration(seconds: 15));
       // Subscribe to the session's event stream.
       socket.emit('resume', {'session_id': sessionId, 'profile': profile});
       // Submit the user input as a run.
@@ -146,12 +159,15 @@ class SessionProvider extends ChangeNotifier {
       final buffer = StringBuffer();
       String? finalSessionId = sessionId;
       String? finalError;
+      String? preFailure;
       var completed = false;
+      var started = false;
 
       try {
         await for (final ev in socket.events.timeout(const Duration(minutes: 5))) {
           switch (ev.name) {
             case 'run.started':
+              started = true;
               break;
             case 'message.delta':
               final delta = _extractDelta(ev.data);
@@ -160,7 +176,12 @@ class SessionProvider extends ChangeNotifier {
             case 'run.completed':
               final d = ev.data as Map?;
               finalSessionId = d?['session_id'] as String? ?? finalSessionId;
-              final out = d?['output'] as String? ?? d?['content'] as String?;
+              final out = (d?['output'] as String?) ??
+                  (d?['final_response'] as String?) ??
+                  (d?['content'] as String?) ??
+                  ((d?['result'] is Map)
+                      ? (d?['result'] as Map)['final_response'] as String?
+                      : null);
               if (out != null && out.isNotEmpty) {
                 // Final assembled output takes precedence over streamed deltas.
                 buffer.clear();
@@ -170,9 +191,19 @@ class SessionProvider extends ChangeNotifier {
               break;
             case 'run.failed':
               final d = ev.data as Map?;
-              finalError = d?['error'] as String? ??
+              final msg = d?['error'] as String? ??
                   d?['message'] as String? ??
                   'run failed';
+              if (started) {
+                // The run started and then failed — a real failure.
+                finalError = msg;
+              } else {
+                // A failure arriving before run.started (e.g. a spurious
+                // "Session not found" emitted in response to `resume`) is not
+                // necessarily fatal — keep listening in case run.started /
+                // run.completed follow (observed with probe-session).
+                preFailure = msg;
+              }
               break;
             default:
               final lower = ev.name.toLowerCase();
@@ -187,6 +218,12 @@ class SessionProvider extends ChangeNotifier {
         }
       } on TimeoutException {
         // Ran past the cap; return whatever streamed so far.
+      }
+
+      // A failure emitted before the run ever started is only fatal if no
+      // run.started / run.completed superseded it.
+      if (!completed && finalError == null && !started && preFailure != null) {
+        finalError = preFailure;
       }
 
       await tunnel.close();
@@ -323,9 +360,6 @@ class SessionProvider extends ChangeNotifier {
 
   /// Maximum changes to retain for the UI list.
   int maxHistory = 50;
-
-  /// The proxy client for DI protocol communication.
-  reader_proxy.ProxyClient? get proxyClient => _proxyClient;
 
   /// Initialize with optional pre-built monitor (e.g., from tests).
   void init({SessionMonitorService? monitor}) {

@@ -155,6 +155,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       return;
     }
 
+    // Tell the server TTS engine which backend to forward to (proxy mode).
+    tts.setServerId(book.serverId);
+
     // Resume where the last session stopped, when there is one.
     final saved = await reader.loadNarration(book.id);
     if (saved != null && saved.pageIndex < reader.pageCount) {
