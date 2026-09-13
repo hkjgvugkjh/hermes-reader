@@ -27,6 +27,13 @@ class ProxyClient {
   int _requestId = 0;
   StreamSubscription? _subscription;
 
+  /// Active WS tunnels keyed by conn_id.
+  final _tunnels = <String, ProxyTunnel>{};
+
+  /// Serializes all outbound frame writes so concurrent encrypt()/send() calls
+  /// cannot interleave and corrupt the single shared socket.
+  Future<void>? _writeChain;
+
   Stream<Map<String, dynamic>> get sessionUpdates => _sessionUpdateController.stream;
 
   bool get isConnected => _connected;
@@ -52,16 +59,7 @@ class ProxyClient {
     }
 
     // Build DIList request (empty payload)
-    final encrypted = await _encrypt('');
-    final lengthBytes = Uint8List(4);
-    final lengthData = ByteData.view(lengthBytes.buffer);
-    lengthData.setUint32(0, encrypted.length, Endian.big);
-
-    final encryptedFrame = BytesBuilder();
-    encryptedFrame.addByte(0x32); // TypeDIList
-    encryptedFrame.add(lengthBytes);
-    encryptedFrame.add(encrypted);
-    _channel!.sink.add(encryptedFrame.toBytes());
+    await _sendFrame(0x32, '');
 
     try {
       final result = await _listResponseCompleter.future.timeout(const Duration(seconds: 10));
@@ -288,17 +286,7 @@ class ProxyClient {
       throw StateError('Not connected');
     }
 
-    final payload = jsonEncode({'server_id': serverId});
-    final encrypted = await _encrypt(payload);
-
-    final frame = BytesBuilder();
-    frame.addByte(0x34); // TypeDISessionPoll
-    final lengthBytes = Uint8List(4);
-    final lengthData = ByteData.view(lengthBytes.buffer);
-    lengthData.setUint32(0, encrypted.length, Endian.big);
-    frame.add(lengthBytes);
-    frame.add(encrypted);
-    _channel!.sink.add(frame.toBytes());
+    await _sendFrame(0x34, jsonEncode({'server_id': serverId}));
     print('[DI] Sent TypeDISessionPoll(0x34) server_id=$serverId');
   }
 
@@ -375,17 +363,7 @@ class ProxyClient {
       payloadMap['instance_id'] = instanceId;
     }
 
-    final payload = jsonEncode(payloadMap);
-    final encrypted = await _encrypt(payload);
-
-    final frame = BytesBuilder();
-    frame.addByte(0x30); // TypeDIConnect
-    final lengthBytes = Uint8List(4);
-    final lengthData = ByteData.view(lengthBytes.buffer);
-    lengthData.setUint32(0, encrypted.length, Endian.big);
-    frame.add(lengthBytes);
-    frame.add(encrypted);
-    _channel!.sink.add(frame.toBytes());
+    await _sendFrame(0x30, jsonEncode(payloadMap));
     final sent = List<String>.of(payloadMap.keys)..remove('server_id');
     print('[DI] Sent TypeDIConnect(0x30) server_id=$serverId with=$sent');
 
@@ -420,21 +398,65 @@ class ProxyClient {
       'body': body != null ? base64Encode(body) : null,
     };
 
-    // Encrypt payload
-    final encrypted = await _encrypt(jsonEncode(payload));
-
-    // Build frame: [1 type][4 length][payload]
-    final frame = BytesBuilder();
-    frame.addByte(0x10); // TypeHTTPRequest
-    final lengthBytes = Uint8List(4);
-    final lengthData = ByteData.view(lengthBytes.buffer);
-    lengthData.setUint32(0, encrypted.length, Endian.big);
-    frame.add(lengthBytes);
-    frame.add(encrypted);
-
-    _channel!.sink.add(frame.toBytes());
+    // Encrypt payload and write the [type][4 length][encrypted] frame.
+    await _sendFrame(0x10, jsonEncode(payload));
 
     return completer.future.timeout(const Duration(minutes: 5));
+  }
+
+  /// Open a WebSocket tunnel to [path] on [serverId] through the proxy.
+  ///
+  /// The proxy relays frames opaquely to the upstream server, so higher-level
+  /// protocols (Socket.IO / Engine.IO) run unmodified inside the tunnel. The
+  /// caller is responsible for authorizing the upstream (e.g. via [headers]).
+  Future<ProxyTunnel> openTunnel({
+    required String serverId,
+    required String path,
+    Map<String, String>? headers,
+  }) async {
+    if (!_connected || _channel == null) {
+      throw StateError('Not connected to proxy');
+    }
+    final connId = 'ws_${_randomId()}';
+    final tunnel = ProxyTunnel._(this, connId, serverId);
+    _tunnels[connId] = tunnel;
+
+    final payloadMap = <String, dynamic>{
+      'conn_id': connId,
+      'server_id': serverId,
+      'path': path,
+    };
+    if (headers != null && headers.isNotEmpty) {
+      payloadMap['headers'] = headers;
+    }
+    await _sendFrame(0x20, jsonEncode(payloadMap));
+
+    try {
+      await tunnel.opened.timeout(const Duration(seconds: 15));
+    } catch (e) {
+      _tunnels.remove(connId);
+      rethrow;
+    }
+    return tunnel;
+  }
+
+  String _randomId() {
+    final rnd = _requestId++;
+    return '${rnd}_${DateTime.now().microsecondsSinceEpoch}';
+  }
+
+  Future<void> _sendTunnelData(String connId, String text) {
+    return _sendFrame(0x22, jsonEncode({
+      'conn_id': connId,
+      'binary': false,
+      'data': base64Encode(utf8.encode(text)),
+    }));
+  }
+
+  Future<void> _closeTunnel(String connId) async {
+    final tunnel = _tunnels.remove(connId);
+    await _sendFrame(0x23, jsonEncode({'conn_id': connId, 'reason': 'client close'}));
+    tunnel?._onClosed('client close');
   }
 
   /// Disconnect from the proxy.
@@ -442,6 +464,10 @@ class ProxyClient {
     _connected = false;
     _sharedKey = null;
     _recreateConnectedCompleter();
+    for (final tunnel in _tunnels.values) {
+      tunnel._onClosed('disconnected');
+    }
+    _tunnels.clear();
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
@@ -506,10 +532,75 @@ class ProxyClient {
           if (!_sessionUpdateController.isClosed) {
             _sessionUpdateController.add(response);
           }
+        } else if (type == 0x21) {
+          // TypeWSOpened - upstream WebSocket connected
+          final connId = response['conn_id'] as String?;
+          if (connId != null) _tunnels[connId]?._onOpened();
+        } else if (type == 0x22) {
+          // TypeWSData - frame payload relayed from upstream
+          final connId = response['conn_id'] as String?;
+          final data = response['data'];
+          if (connId != null && data != null) {
+            final tunnel = _tunnels[connId];
+            if (tunnel != null) {
+              try {
+                final bytes = data is String ? base64Decode(data) : List<int>.from(data as List);
+                tunnel._onData(utf8.decode(bytes));
+              } catch (_) {
+                // non-text (binary) frame; ignore for now
+              }
+            }
+          }
+        } else if (type == 0x23) {
+          // TypeWSClose - upstream closed
+          final connId = response['conn_id'] as String?;
+          if (connId != null) {
+            final tunnel = _tunnels.remove(connId);
+            tunnel?._onClosed(response['reason'] as String?);
+          }
+        } else if (type == 0x24) {
+          // TypeWSError - tunnel error
+          final connId = response['conn_id'] as String?;
+          if (connId != null) {
+            final tunnel = _tunnels.remove(connId);
+            tunnel?._onError(response['error'] as String? ?? 'ws error ${response['code']}');
+          }
         }
       } catch (e) {
         // Decryption or parse failed
       }
+    });
+  }
+
+  /// Serialize an outbound task behind any in-flight writes so concurrent
+  /// [sendRequest]/tunnel frames can't interleave on the single socket.
+  Future<void> _enqueueWrite(Future<void> Function() task) {
+    final prev = _writeChain;
+    final completer = Completer<void>();
+    _writeChain = completer.future;
+    (prev ?? Future<void>.value()).whenComplete(() {
+      task().then((_) {
+        if (!completer.isCompleted) completer.complete();
+      }, onError: (Object e, StackTrace st) {
+        if (!completer.isCompleted) completer.completeError(e, st);
+      });
+    });
+    return completer.future;
+  }
+
+  /// Encrypt [payload] and write a single protocol frame of the form
+  /// `[1 type][4 length big-endian][encrypted payload]`.
+  Future<void> _sendFrame(int type, String payload) {
+    return _enqueueWrite(() async {
+      final encrypted = await _encrypt(payload);
+      final frame = BytesBuilder();
+      frame.addByte(type);
+      final lengthBytes = Uint8List(4);
+      final lengthData = ByteData.view(lengthBytes.buffer);
+      lengthData.setUint32(0, encrypted.length, Endian.big);
+      frame.add(lengthBytes);
+      frame.add(encrypted);
+      _channel!.sink.add(frame.toBytes());
     });
   }
 
@@ -573,4 +664,76 @@ class ConnectionClosedException implements Exception {
   ConnectionClosedException(this.message);
   @override
   String toString() => 'ConnectionClosedException: $message';
+}
+
+/// A relayed upstream WebSocket tunnel over the proxy DI protocol.
+///
+/// [data] delivers decoded text frames from the upstream server; [send] writes
+/// text frames upstream. Higher-level protocols (Socket.IO / Engine.IO) ride on
+/// top transparently. Close it when done so the proxy tears down the upstream
+/// connection.
+class ProxyTunnel {
+  final ProxyClient _client;
+  final String connId;
+  final String serverId;
+
+  final _data = StreamController<String>.broadcast();
+  final _opened = Completer<void>();
+  final _done = Completer<void>();
+  String? _closeReason;
+  bool _finished = false;
+
+  ProxyTunnel._(this._client, this.connId, this.serverId);
+
+  /// Upstream text frames in the order they arrive.
+  Stream<String> get data => _data.stream;
+
+  /// Completes once the proxy reports the upstream socket is open.
+  Future<void> get opened => _opened.future;
+
+  /// Completes when the tunnel is fully closed (locally or by the proxy).
+  Future<void> get done => _done.future;
+
+  /// Reason reported by the proxy when the tunnel closed, if any.
+  String? get closeReason => _closeReason;
+
+  void _onOpened() {
+    if (!_opened.isCompleted) _opened.complete();
+  }
+
+  void _onData(String text) {
+    if (!_data.isClosed) _data.add(text);
+  }
+
+  void _onClosed(String? reason) {
+    _closeReason = reason;
+    _finish();
+  }
+
+  void _onError(String reason) {
+    _closeReason = reason;
+    if (!_opened.isCompleted) _opened.completeError(ProxyTunnelException(reason));
+    _finish();
+  }
+
+  void _finish() {
+    if (_finished) return;
+    _finished = true;
+    if (!_data.isClosed) _data.close();
+    if (!_done.isCompleted) _done.complete();
+  }
+
+  /// Send a text frame upstream.
+  Future<void> send(String text) => _client._sendTunnelData(connId, text);
+
+  /// Close the tunnel (tears down the upstream connection).
+  Future<void> close() => _client._closeTunnel(connId);
+}
+
+/// Exception thrown when a [ProxyTunnel] fails to open or errors mid-stream.
+class ProxyTunnelException implements Exception {
+  final String message;
+  ProxyTunnelException(this.message);
+  @override
+  String toString() => 'ProxyTunnelException: $message';
 }

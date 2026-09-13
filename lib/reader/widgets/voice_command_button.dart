@@ -9,11 +9,16 @@ class VoiceCommandButton extends StatefulWidget {
   final String? authToken;
   final void Function(String transcript)? onResult;
 
+  /// When set, the recorded audio is routed through this sender (e.g. the
+  /// proxy/DI protocol) instead of the direct HTTP [baseUrl] endpoint.
+  final Future<VoiceTurnResult> Function(String filePath)? proxySender;
+
   const VoiceCommandButton({
     super.key,
     required this.baseUrl,
     this.authToken,
     this.onResult,
+    this.proxySender,
   });
 
   @override
@@ -61,11 +66,13 @@ class _VoiceCommandButtonState extends State<VoiceCommandButton> {
       setState(() => _sending = false);
       return;
     }
-    final result = await _svc.sendTurn(
-      baseUrl: widget.baseUrl,
-      authToken: widget.authToken,
-      filePath: path,
-    );
+    final result = widget.proxySender != null
+        ? await widget.proxySender!(path)
+        : await _svc.sendTurn(
+            baseUrl: widget.baseUrl,
+            authToken: widget.authToken,
+            filePath: path,
+          );
     if (!mounted) return;
     setState(() {
       _sending = false;
