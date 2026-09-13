@@ -20,7 +20,8 @@ class ChapterDetector {
   /// Patterns that recognizably begin a heading at the start of a line.
   static final List<RegExp> _linePatterns = [
     // 第一章 / 第12章 / 第十二回 / 第叁卷 …
-    RegExp(r'^第\s*[0-9零一二三四五六七八九十百千〇两]+\s*[章卷回节部篇集幕话]\s*(.*)$'),
+    // 数字与"章/回"之间、以及标题前允许半角/全角空格或制表符。
+    RegExp(r'^第[ \t　]*[0-9零一二三四五六七八九十百千〇两]+[ \t　]*[章卷回节部篇集幕话][ \t　]*(.*)$'),
     // Chapter 1 / CHAPTER ONE / Volume 2 / Section 3
     RegExp(
       r'^(chapter|volume|section|part|vol|book)\s+'
@@ -60,11 +61,16 @@ class ChapterDetector {
       final lineStart = offset;
       offset += raw.length + 1; // +1 for the '\n' consumed by split
 
-      final trimmed = raw.trim();
-      if (trimmed.isEmpty) continue;
-      if (trimmed.length > 40) continue; // headings are short
+      // Strip leading indentation (spaces / full-width spaces / tabs) that some
+      // TXT exports add even to chapter headings, then trim.
+      final dedented = raw.replaceFirst(RegExp(r'^\s*'), '').trim();
+      if (dedented.isEmpty) continue;
+      // Headings are short — but allow a little trailing body text that some
+      // exports glue onto the heading line by only considering the leading
+      // portion when matching.
+      if (dedented.length > 60) continue;
 
-      final cleaned = trimmed.replaceAll(RegExp(r'^[*\-=·#]+'), '').trim();
+      final cleaned = dedented.replaceAll(RegExp(r'^[*\-=·#]+'), '').trim();
       if (cleaned.isEmpty) continue;
 
       final title = _matchHeading(cleaned);
@@ -81,7 +87,8 @@ class ChapterDetector {
       }
     }
 
-    return result.length >= 2 ? result : const [];
+    // 单章也返回(至少能跳转); 没有则返回空(调用方回退到普通翻页)。
+    return result;
   }
 
   /// Returns the heading title for [line] (which must already be trimmed and

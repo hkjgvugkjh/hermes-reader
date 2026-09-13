@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_tts/flutter_tts.dart';
 
 import 'tts_service.dart';
+import 'proxy_client.dart';
 
 /// On-device speech via flutter_tts.
 ///
@@ -184,4 +185,7 @@ class LocalTtsSource implements SpeechSource {
   void setServerId(String? serverId) {
     // Local engine does not use the proxy; ignored.
   }
+
+  @override
+  void setProxyClient(ProxyClient? client) {}
 }

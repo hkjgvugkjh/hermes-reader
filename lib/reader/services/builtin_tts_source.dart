@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
@@ -8,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'tts_service.dart';
 import 'builtin_tts_sherpa.dart' show SherpaOnnxImplFactory;
+import 'proxy_client.dart';
 
 /// On-device neural TTS bundled with the app.
 ///
@@ -56,7 +58,9 @@ class BuiltinTtsSource implements SpeechSource {
       throw Exception('builtin TTS model not available');
     }
     final audio = await _sherpaFactory.generate(_tts!, text);
+    debugPrint('builtin speak: playing ${audio.length} bytes');
     await _player.playBytes(audio, contentType: 'audio/wav');
+    debugPrint('builtin speak: playback started');
   }
 
   @override
@@ -79,6 +83,9 @@ class BuiltinTtsSource implements SpeechSource {
   void setServerId(String? serverId) {
     // Builtin engine does not use the proxy; ignored.
   }
+
+  @override
+  void setProxyClient(ProxyClient? client) {}
 
   @override
   Future<void> dispose() async {
@@ -127,6 +134,27 @@ class BuiltinTtsSource implements SpeechSource {
       } catch (_) {
         // Optional files (json/readme) may be absent; ignore.
       }
+    }
+    // espeak-ng 前端数据(Piper VITS 中文 G2P 必需)打包为 zip 单 asset，
+    // 运行时解压到 modelDir/espeak-ng-data。
+    try {
+      final zipBytes = await rootBundle.load('$modelDir/espeak-ng-data.zip');
+      final archive = ZipDecoder().decodeBytes(
+        zipBytes.buffer.asUint8List(zipBytes.offsetInBytes, zipBytes.lengthInBytes),
+      );
+      for (final file in archive) {
+        final filePath = '${out.path}/${file.name}';
+        if (file.isFile) {
+          await File(filePath)
+              .create(recursive: true)
+              .then((f) => f.writeAsBytes(file.content as List<int>));
+        } else {
+          await Directory(filePath).create(recursive: true);
+        }
+      }
+      debugPrint('builtin TTS: espeak-ng-data unpacked');
+    } catch (e) {
+      debugPrint('builtin TTS: espeak-ng-data missing ($e)');
     }
     await File('${out.path}/.unpacked').writeAsString('1');
     return out.path;

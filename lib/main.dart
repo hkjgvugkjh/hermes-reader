@@ -69,15 +69,12 @@ class HermesReaderApp extends StatelessWidget {
             builtinSource: BuiltinTtsSource(),
           ),
           update: (_, session, previous) {
-            previous?.dispose();
-            return TtsService(
-              serverSource: ServerTtsSource(
-                baseUrl: '',
-                proxyClient: session.proxyClient,
-              ),
-              localSource: LocalTtsSource(),
-              builtinSource: BuiltinTtsSource(),
-            );
+            // Keep a single TtsService instance alive for the app's lifetime.
+            // Only refresh the proxy client used by the server engine so that
+            // (re)connecting sessions no longer tear down running narration or
+            // kill the sherpa-onnx isolate every time sessions are polled.
+            previous?.setProxyClient(session.proxyClient);
+            return previous!;
           },
           dispose: (_, service) => service.dispose(),
         ),

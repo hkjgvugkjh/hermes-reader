@@ -30,7 +30,7 @@ class ServerTtsSource implements SpeechSource {
   }
 
   final String baseUrl;
-  final reader_proxy.ProxyClient? _proxyClient;
+  reader_proxy.ProxyClient? _proxyClient;
   String? _serverId;
 
   /// High-level TTS client used in proxy mode. Null when talking to the backend
@@ -56,6 +56,15 @@ class ServerTtsSource implements SpeechSource {
   void setServerId(String? serverId) {
     _serverId = serverId;
     _tts?.setServerId(serverId);
+  }
+
+  /// Update the proxy client used to tunnel synthesis requests, without
+  /// recreating the source. Called by [TtsService] when the session's proxy
+  /// client changes so that the engine stays alive across reconnects.
+  @override
+  void setProxyClient(reader_proxy.ProxyClient? client) {
+    _proxyClient = client;
+    _tts = client != null ? HermesTtsClient.proxy(client, serverId: _serverId) : null;
   }
 
   @override
