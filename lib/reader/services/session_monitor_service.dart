@@ -220,6 +220,25 @@ class SessionMonitorService {
 
   List<MonitorTarget> get targets => List.unmodifiable(_targets);
 
+  /// Latest known snapshot for each session id across all monitored servers.
+  Map<String, SessionSnapshot> get currentSessions {
+    final map = <String, SessionSnapshot>{};
+    for (final list in _lastSnapshots.values) {
+      for (final s in list) {
+        map[s.id] = s;
+      }
+    }
+    return map;
+  }
+
+  /// The id of the server a session is monitored under, or null if unknown.
+  String? serverIdForSession(String sessionId) {
+    for (final entry in _lastSnapshots.entries) {
+      if (entry.value.any((s) => s.id == sessionId)) return entry.key;
+    }
+    return null;
+  }
+
   /// Set (or clear) the auth token for a server (e.g., after login).
   void setToken(String serverId, String? token) {
     _serverTokens[serverId] = token;
