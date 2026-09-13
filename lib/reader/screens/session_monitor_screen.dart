@@ -1,12 +1,13 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../providers/server_provider.dart';
 import '../providers/session_provider.dart';
-import '../services/notification_service.dart';
 import '../services/session_monitor_service.dart';
+import '../widgets/voice_command_button.dart';
 
-/// Full-screen session monitoring UI.
+/// Monitor for Hermes sessions across configured servers.
 class SessionMonitorScreen extends StatefulWidget {
   const SessionMonitorScreen({super.key});
 
@@ -15,134 +16,337 @@ class SessionMonitorScreen extends StatefulWidget {
 }
 
 class _SessionMonitorScreenState extends State<SessionMonitorScreen> {
-  final _notificationSvc = NotificationService();
-
-  @override
-  void initState() {
-    super.initState();
-    _notificationSvc.init();
-  }
-
-  @override
-  void dispose() {
-    _notificationSvc.dispose();
-    super.dispose();
-  }
+  int _view = 0; // 0 = 会话, 1 = 事件
+  String? _serverFilter;
 
   @override
   Widget build(BuildContext context) {
-    final sessionProvider = context.watch<SessionProvider>();
-    final serverProvider = context.watch<ServerProvider>();
-    final theme = Theme.of(context);
+    return Consumer<SessionProvider>(
+      builder: (context, provider, _) {
+        final sessions = provider.currentSessions.where((s) {
+          if (_serverFilter == null) return true;
+          return provider.serverIdForSession(s.id) == _serverFilter;
+        }).toList();
+        final changes = provider.recentChanges.where((c) {
+          if (_serverFilter == null) return true;
+          return c.serverId == _serverFilter;
+        }).toList();
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('会话监控'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: '立即刷新',
-            onPressed: () async {
-              for (final target in sessionProvider.monitor.targets) {
-                await sessionProvider.pollNow(target.serverId);
-              }
-            },
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('会话监控'),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: '刷新',
+                onPressed: () async {
+                  if (_serverFilter != null) {
+                    await provider.pollNow(_serverFilter!);
+                  } else {
+                    for (final t in provider.monitor.targets) {
+                      await provider.pollNow(t.serverId);
+                    }
+                  }
+                },
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete_sweep),
+                tooltip: '清空事件',
+                onPressed: provider.clearHistory,
+              ),
+            ],
           ),
-          IconButton(
-            icon: sessionProvider.isMonitoring
-                ? const Icon(Icons.pause)
-                : const Icon(Icons.play_arrow),
-            tooltip: sessionProvider.isMonitoring ? '暂停' : '开始',
-            onPressed: () async {
-              if (sessionProvider.isMonitoring) {
-                await sessionProvider.stop();
-              } else {
-                await sessionProvider.start();
-              }
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.delete_sweep),
-            tooltip: '清空历史',
-            onPressed: sessionProvider.clearHistory,
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          if (serverProvider.servers.isNotEmpty)
-            _ServerToggleList(
-              servers: serverProvider.servers,
-              monitor: sessionProvider.monitor,
-              onToggle: (serverId, enabled) {
-                if (enabled) {
-                  final server = serverProvider.servers
-                      .firstWhere((s) => s.id == serverId);
-                  sessionProvider.addServer(MonitorTarget(
-                    serverId: serverId,
-                    baseUrl: server.baseUrl,
-                    authToken: server.authToken,
-                  ));
-                } else {
-                  sessionProvider.removeServer(serverId);
-                }
-              },
-            ),
-          const Divider(height: 1),
-          Expanded(
-            child: sessionProvider.recentChanges.isEmpty
-                ? Center(
-                    child: Text(
-                      '暂无变更事件',
-                      style: TextStyle(color: theme.disabledColor),
+          body: Column(
+            children: [
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Row(
+                  children: [
+                    SegmentedButton<int>(
+                      segments: const [
+                        ButtonSegment(value: 0, label: Text('会话')),
+                        ButtonSegment(value: 1, label: Text('事件')),
+                      ],
+                      selected: {_view},
+                      onSelectionChanged: (s) => setState(() => _view = s.first),
                     ),
-                  )
-                : ListView.builder(
-                    itemCount: sessionProvider.recentChanges.length,
-                    itemBuilder: (context, index) {
-                      final change = sessionProvider.recentChanges[index];
-                      return _ChangeTile(change: change);
-                    },
-                  ),
+                    const Spacer(),
+                    DropdownButton<String?>(
+                      value: _serverFilter,
+                      hint: const Text('所有服务器'),
+                      items: [
+                        const DropdownMenuItem(
+                          value: null,
+                          child: Text('所有服务器'),
+                        ),
+                        ...provider.monitor.targets.map(
+                          (t) => DropdownMenuItem(
+                            value: t.serverId,
+                            child: Text(t.serverId),
+                          ),
+                        ),
+                      ],
+                      onChanged: (v) => setState(() => _serverFilter = v),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: _view == 0
+                    ? _buildSessions(sessions, provider)
+                    : _buildChanges(changes),
+              ),
+            ],
           ),
-        ],
+        );
+      },
+    );
+  }
+
+  Widget _buildSessions(List<SessionSnapshot> sessions, SessionProvider provider) {
+    if (sessions.isEmpty) {
+      return const Center(child: Text('暂无会话快照'));
+    }
+    return ListView.builder(
+      itemCount: sessions.length,
+      itemBuilder: (_, i) {
+        final snap = sessions[i];
+        final serverId = provider.serverIdForSession(snap.id) ?? '';
+        return _SessionTile(
+          snapshot: snap,
+          serverId: serverId,
+          onTap: () => _openSnapshot(snap, serverId, provider),
+        );
+      },
+    );
+  }
+
+  Widget _buildChanges(List<SessionChange> changes) {
+    if (changes.isEmpty) {
+      return const Center(child: Text('暂无事件'));
+    }
+    return ListView.builder(
+      itemCount: changes.length,
+      itemBuilder: (_, i) => _ChangeTile(change: changes[i]),
+    );
+  }
+
+  void _openSnapshot(
+    SessionSnapshot snap,
+    String serverId,
+    SessionProvider provider,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _SessionSnapshotSheet(
+        snapshot: snap,
+        serverId: serverId,
+        provider: provider,
       ),
     );
   }
 }
 
-class _ServerToggleList extends StatelessWidget {
-  final List servers;
-  final SessionMonitorService monitor;
-  final void Function(String serverId, bool enabled) onToggle;
+class _SessionTile extends StatelessWidget {
+  final SessionSnapshot snapshot;
+  final String serverId;
+  final VoidCallback onTap;
 
-  const _ServerToggleList({
-    required this.servers,
-    required this.monitor,
-    required this.onToggle,
+  const _SessionTile({
+    required this.snapshot,
+    required this.serverId,
+    required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 56,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        children: [
-          for (final server in servers)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: FilterChip(
-                label: Text(server.name, style: const TextStyle(fontSize: 12)),
-                selected: monitor.targets
-                    .any((t) => t.serverId == server.id),
-                onSelected: (v) => onToggle(server.id, v),
-              ),
+    return ListTile(
+      leading: Icon(Icons.chat_bubble_outline, color: _stateColor(snapshot.state)),
+      title: Text(
+        snapshot.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        '服务器: $serverId  •  ${_fmtTime(snapshot.lastActivity)}',
+        style: const TextStyle(fontSize: 12),
+      ),
+      trailing: Chip(
+        label: Text(_stateLabel(snapshot.state)),
+        backgroundColor: _stateColor(snapshot.state).withAlpha(38),
+      ),
+      onTap: onTap,
+    );
+  }
+}
+
+/// Bottom sheet shown when a session is tapped: the latest snapshot plus a
+/// voice-command box that sends the transcribed text as a chat command.
+class _SessionSnapshotSheet extends StatefulWidget {
+  final SessionSnapshot snapshot;
+  final String serverId;
+  final SessionProvider provider;
+
+  const _SessionSnapshotSheet({
+    required this.snapshot,
+    required this.serverId,
+    required this.provider,
+  });
+
+  @override
+  State<_SessionSnapshotSheet> createState() => _SessionSnapshotSheetState();
+}
+
+class _SessionSnapshotSheetState extends State<_SessionSnapshotSheet> {
+  bool _showRaw = false;
+  String? _transcript;
+  String? _reply;
+  String? _error;
+  bool _sending = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final snap = widget.snapshot;
+    final target = widget.provider.targetForServer(widget.serverId);
+    final proxy = widget.provider.proxyClient;
+    final useProxy = proxy != null && proxy.isConnected;
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.92,
+      ),
+      padding: const EdgeInsets.all(16),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    snap.title,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
             ),
-        ],
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                Chip(
+                  label: Text('状态: ${_stateLabel(snap.state)}'),
+                  backgroundColor: _stateColor(snap.state).withAlpha(38),
+                ),
+                Chip(label: Text('服务器: ${widget.serverId}')),
+                Chip(label: Text('更新: ${_fmtTime(snap.lastActivity)}')),
+              ],
+            ),
+            if (snap.pendingAction != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                '待处理操作: ${snap.pendingAction!}',
+                style: const TextStyle(color: Colors.orange),
+              ),
+            ],
+            const SizedBox(height: 12),
+            const Text('最后的快照', style: TextStyle(fontWeight: FontWeight.bold)),
+            TextButton(
+              onPressed: () => setState(() => _showRaw = !_showRaw),
+              child: Text(_showRaw ? '收起' : '展开原始数据'),
+            ),
+            if (_showRaw && snap.raw != null)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black12,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  const JsonEncoder.withIndent('  ').convert(snap.raw),
+                  style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                ),
+              ),
+            const SizedBox(height: 16),
+            const Divider(),
+            const Text('语音发送命令',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            if (target != null)
+              VoiceCommandButton(
+                baseUrl: target.baseUrl,
+                authToken: target.authToken,
+                proxySender: useProxy
+                    ? (path) => widget.provider.sendVoiceTurnViaProxy(
+                          widget.serverId,
+                          path,
+                          target.authToken,
+                        )
+                    : null,
+                onResult: _send,
+              )
+            else
+              const Text('未找到服务器配置，无法发送语音命令',
+                  style: TextStyle(color: Colors.grey)),
+            if (_transcript != null) ...[
+              const SizedBox(height: 8),
+              Text('识别: $_transcript'),
+            ],
+            if (_sending)
+              const Padding(
+                padding: EdgeInsets.all(8),
+                child: LinearProgressIndicator(),
+              ),
+            if (_reply != null) ...[
+              const SizedBox(height: 8),
+              const Text('回复:', style: TextStyle(fontWeight: FontWeight.bold)),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black12,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(_reply!),
+              ),
+            ],
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text('错误: $_error',
+                    style: const TextStyle(color: Colors.red)),
+              ),
+          ],
+        ),
       ),
     );
+  }
+
+  Future<void> _send(String transcript) async {
+    setState(() {
+      _sending = true;
+      _error = null;
+      _reply = null;
+    });
+    final result =
+        await widget.provider.sendCommandToSession(widget.snapshot.id, transcript);
+    if (!mounted) return;
+    setState(() {
+      _sending = false;
+      _transcript = transcript;
+      if (result.success) {
+        _reply = result.content;
+      } else {
+        _error = result.error ?? result.content;
+      }
+    });
   }
 }
 
@@ -151,80 +355,64 @@ class _ChangeTile extends StatelessWidget {
 
   const _ChangeTile({required this.change});
 
-  IconData get _icon {
-    switch (change.kind) {
+  String _kindLabel(SessionChangeKind kind) {
+    switch (kind) {
       case SessionChangeKind.sessionStarted:
-        return Icons.play_circle;
+        return '开始';
       case SessionChangeKind.sessionStopped:
-        return Icons.stop_circle;
+        return '停止';
       case SessionChangeKind.sessionNeedsInput:
-        return Icons.help_outline;
+        return '需要输入';
       case SessionChangeKind.sessionResumed:
-        return Icons.replay_circle_filled;
+        return '恢复';
       case SessionChangeKind.authRequired:
-        return Icons.lock;
+        return '需要认证';
       case SessionChangeKind.serverError:
-        return Icons.error;
-    }
-  }
-
-  Color _color(ThemeData theme) {
-    switch (change.kind) {
-      case SessionChangeKind.sessionStarted:
-        return Colors.green;
-      case SessionChangeKind.sessionStopped:
-        return theme.disabledColor;
-      case SessionChangeKind.sessionNeedsInput:
-        return Colors.orange;
-      case SessionChangeKind.sessionResumed:
-        return Colors.blue;
-      case SessionChangeKind.authRequired:
-        return Colors.red;
-      case SessionChangeKind.serverError:
-        return Colors.red;
-    }
-  }
-
-  String get _title {
-    switch (change.kind) {
-      case SessionChangeKind.sessionStarted:
-        return '会话启动';
-      case SessionChangeKind.sessionStopped:
-        return '会话停止';
-      case SessionChangeKind.sessionNeedsInput:
-        return '需要处理';
-      case SessionChangeKind.sessionResumed:
-        return '会话恢复';
-      case SessionChangeKind.authRequired:
-        return '授权失效';
-      case SessionChangeKind.serverError:
-        return '服务器异常';
+        return '服务器错误';
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final title = change.after?.title ?? change.before?.title ?? '未知会话';
-    final body = '${change.serverId} · $_title';
-
-    return ListTile(
-      leading: Icon(_icon, color: _color(theme)),
-      title: Text(title),
-      subtitle: Text(body),
-      trailing: Text(
-        _formatTime(change.detectedAt),
-        style: TextStyle(color: theme.disabledColor, fontSize: 11),
+    final snap = change.after ?? change.before;
+    return SwitchListTile(
+      value: change.after != null,
+      onChanged: null,
+      title: Text('${_kindLabel(change.kind)} · ${snap?.title ?? change.serverId}'),
+      subtitle: Text(
+        '服务器: ${change.serverId}  •  ${_fmtTime(change.detectedAt)}',
       ),
     );
   }
+}
 
-  static String _formatTime(DateTime t) {
-    final now = DateTime.now();
-    final diff = now.difference(t);
-    if (diff.inSeconds < 60) return '${diff.inSeconds}秒前';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前';
-    if (diff.inHours < 24) return '${diff.inHours}小时前';
-    return '${diff.inDays}天前';
+Color _stateColor(SessionState state) {
+  switch (state) {
+    case SessionState.running:
+      return Colors.green;
+    case SessionState.stopped:
+      return Colors.grey;
+    case SessionState.pending:
+      return Colors.orange;
+    case SessionState.error:
+      return Colors.red;
   }
+}
+
+String _stateLabel(SessionState state) {
+  switch (state) {
+    case SessionState.running:
+      return '运行中';
+    case SessionState.stopped:
+      return '已停止';
+    case SessionState.pending:
+      return '待输入';
+    case SessionState.error:
+      return '错误';
+  }
+}
+
+String _fmtTime(DateTime t) {
+  final s = t.toLocal().toString();
+  return s.length > 19 ? s.substring(0, 19) : s;
 }

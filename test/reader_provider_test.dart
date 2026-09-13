@@ -188,4 +188,32 @@ void main() {
     reader.updateConfig(reader.config.copyWith(charsPerPage: 1000));
     expect(reader.pageIndex, lessThan(reader.pageCount));
   });
+
+  group('chapter detection', () {
+    test('builds a toc in the background and jumps to a chapter', () async {
+      final text = [
+        '序言',
+        '第一章 开始',
+        '正文内容。' * 50,
+        '第二章 发展',
+        '正文内容。' * 50,
+        '第三章 结束',
+        '正文内容。' * 50,
+      ].join('\n');
+      final reader = await _opened(text: text);
+
+      // Detection runs on a background isolate; wait for it to publish.
+      for (var i = 0; i < 100 && !reader.hasChapters; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+
+      expect(reader.hasChapters, isTrue);
+      expect(reader.chapters.length, 4);
+
+      reader.goToPage(0);
+      reader.goToChapter(2);
+      expect(reader.pageIndex, greaterThan(0));
+      expect(reader.currentChapterIndex, 2);
+    });
+  });
 }

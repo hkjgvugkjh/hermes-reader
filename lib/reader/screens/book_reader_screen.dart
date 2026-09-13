@@ -318,6 +318,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         onPrev: reader.previousPage,
                         onNext: reader.nextPage,
                         onNarrate: _toggleNarration,
+                        onJump: () => _showJump(reader),
+                        chapterTitle: reader.hasChapters
+                            ? (reader.currentChapterIndex >= 0
+                                ? reader.chapters[reader.currentChapterIndex].title
+                                : null)
+                            : null,
                       ),
                   ],
                 ),
@@ -401,6 +407,121 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
           },
         );
       },
+    );
+  }
+
+  /// Opens the jump UI: the chapter table of contents when one was detected,
+  /// otherwise a plain page-number jump.
+  void _showJump(ReaderProvider reader) {
+    if (reader.hasChapters) {
+      _showChapterList(reader);
+    } else {
+      _showPageJump(reader);
+    }
+  }
+
+  /// Shows the detected table of contents as a bottom sheet; tapping an entry
+  /// jumps to that chapter's first page.
+  void _showChapterList(ReaderProvider reader) {
+    final current = reader.currentChapterIndex;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text('目录',
+                  style: Theme.of(context).textTheme.titleMedium),
+            ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: reader.chapters.length,
+                itemBuilder: (_, i) {
+                  final ch = reader.chapters[i];
+                  final active = i == current;
+                  return ListTile(
+                    dense: true,
+                    title: Text(
+                      ch.title,
+                      style: TextStyle(
+                        fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                        color: active
+                            ? Theme.of(context).colorScheme.primary
+                            : null,
+                      ),
+                    ),
+                    trailing: active
+                        ? Icon(Icons.bookmark,
+                            size: 16,
+                            color: Theme.of(context).colorScheme.primary)
+                        : null,
+                    onTap: () {
+                      reader.goToChapter(i);
+                      Navigator.pop(ctx);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Shows a page-number jump dialog with a slider and a numeric field.
+  void _showPageJump(ReaderProvider reader) {
+    var target = reader.pageIndex + 1;
+    final controller = TextEditingController(text: '$target');
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('跳页'),
+        content: StatefulBuilder(
+          builder: (_, setS) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Slider(
+                value: target.toDouble(),
+                min: 1,
+                max: reader.pageCount.toDouble(),
+                divisions: reader.pageCount > 1 ? reader.pageCount - 1 : 1,
+                label: '$target',
+                onChanged: (v) {
+                  target = v.toInt();
+                  controller.text = '$target';
+                  setS(() {});
+                },
+              ),
+              TextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  hintText: '输入页码 1-${reader.pageCount}',
+                ),
+                onChanged: (v) {
+                  final n = int.tryParse(v);
+                  if (n != null) target = n.clamp(1, reader.pageCount);
+                },
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              reader.goToPage(target - 1);
+              Navigator.pop(ctx);
+            },
+            child: const Text('跳转'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -504,6 +625,8 @@ class _ReaderFooter extends StatelessWidget {
     required this.onPrev,
     required this.onNext,
     required this.onNarrate,
+    required this.onJump,
+    this.chapterTitle,
   });
 
   final int pageIndex;
@@ -514,19 +637,62 @@ class _ReaderFooter extends StatelessWidget {
   final VoidCallback onPrev;
   final VoidCallback onNext;
   final Future<void> Function() onNarrate;
+  final VoidCallback onJump;
+  final String? chapterTitle;
 
   @override
   Widget build(BuildContext context) {
+    final footerStyle = const TextStyle(fontSize: 13);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        LinearProgressIndicator(value: pageCount > 1 ? progress : 1.0),
+        if (chapterTitle != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+            child: Text(
+              chapterTitle!,
+              style: footerStyle.copyWith(fontWeight: FontWeight.w600),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        Tooltip(
+          message: chapterTitle != null ? '目录 / 跳章' : '跳页',
+          child: GestureDetector(
+            onTap: onJump,
+            behavior: HitTestBehavior.opaque,
+            child: LinearProgressIndicator(
+              value: pageCount > 1 ? progress : 1.0,
+              minHeight: 6,
+            ),
+          ),
+        ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: Row(
             children: [
-              Text('${pageIndex + 1} / $pageCount',
-                  style: const TextStyle(fontSize: 13)),
+              InkWell(
+                onTap: onJump,
+                borderRadius: BorderRadius.circular(6),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        chapterTitle != null ? Icons.menu_book : Icons.explore,
+                        size: 15,
+                        color: footerStyle.color,
+                      ),
+                      const SizedBox(width: 4),
+                      Text('${pageIndex + 1} / $pageCount',
+                          style: footerStyle),
+                    ],
+                  ),
+                ),
+              ),
               const Spacer(),
               IconButton(
                 icon: const Icon(Icons.chevron_left),
