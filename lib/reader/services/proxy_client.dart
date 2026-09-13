@@ -23,6 +23,11 @@ class ProxyClient {
   final _responseCallbacks = <String, Completer<Map<String, dynamic>>>{};
   final _listResponseCompleter = Completer<List<Map<String, dynamic>>>();
   final _connectCompleters = <String, Completer<void>>{};
+  /// Backend JWTs returned by the proxy in the TypeDIConnectAck (0x31) frame,
+  /// keyed by serverId. The proxy obtains these during mcu-login; the reader
+  /// uses them to authenticate Socket.IO namespaces (e.g. /chat-run) instead
+  /// of its own proxy auth token.
+  final _backendJWTs = <String, String>{};
   final _sessionUpdateController = StreamController<Map<String, dynamic>>.broadcast();
   int _requestId = 0;
   StreamSubscription? _subscription;
@@ -329,6 +334,11 @@ class ProxyClient {
   /// without them the proxy's mcu-login fails and the client just waits for a
   /// ConnectAck that never comes, surfacing as an 8s timeout. Callers must pass
   /// [username]/[password] (and optionally [profile]) from their ServerConfig.
+  ///
+  /// On success the proxy's ConnectAck also carries the backend JWT (obtained
+  /// during mcu-login), which is cached and retrievable via [backendJWT].
+  String? backendJWT(String serverId) => _backendJWTs[serverId];
+
   Future<void> connectServer(
     String serverId, {
     String? username,
@@ -518,6 +528,10 @@ class ProxyClient {
         } else if (type == 0x31) {
           // TypeDIConnectAck - server accepted connection
           final serverId = response['server_id'] as String?;
+          final token = response['token'] as String?;
+          if (serverId != null && token != null && token.isNotEmpty) {
+            _backendJWTs[serverId] = token;
+          }
           if (serverId != null && _connectCompleters.containsKey(serverId)) {
             _connectCompleters[serverId]!.complete();
             _connectCompleters.remove(serverId);

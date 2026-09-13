@@ -20,6 +20,7 @@ class SocketIoClient {
   final StreamController<SocketIoEvent> _events =
       StreamController<SocketIoEvent>.broadcast();
   final _opened = Completer<Map<String, dynamic>>();
+  final _connectedCompleter = Completer<void>();
   bool _connected = false;
 
   SocketIoClient({
@@ -88,34 +89,76 @@ class SocketIoClient {
   void _handleSocketFrame(String s) {
     if (s.isEmpty) return;
     final type = s[0];
-    if (type == '0') {
-      // namespace CONNECT ack
-      _connected = true;
-      return;
-    }
-    if (type == '2') {
-      // event: <ns>[,<json array>]
-      var rest = s.substring(1);
-      if (rest.startsWith('/')) {
-        final idx = rest.indexOf(',');
-        if (idx < 0) return; // no payload
-        rest = rest.substring(idx + 1);
-      }
-      if (rest.isEmpty) return;
-      try {
-        final arr = jsonDecode(rest) as List<dynamic>;
-        final name = arr[0] as String;
-        final data = arr.length > 1 ? arr[1] : null;
-        _events.add(SocketIoEvent(name: name, data: data));
-      } catch (_) {
-        // ignore malformed events
-      }
+    switch (type) {
+      case '0': // namespace CONNECT ack (`40<ns>,{sid,pid}`)
+        _connected = true;
+        if (!_connectedCompleter.isCompleted) _connectedCompleter.complete();
+        break;
+      case '1': // namespace DISCONNECT (arrived before connect completed)
+        if (!_connectedCompleter.isCompleted) {
+          _connectedCompleter.completeError('namespace disconnected');
+        }
+        break;
+      case '4': // namespace CONNECT_ERROR (`44<ns>,{message:...}`)
+        if (!_connectedCompleter.isCompleted) {
+          final msg = _parsePayloadText(s.substring(1)) ?? 'connect_error';
+          _connectedCompleter.completeError(msg);
+          _events.add(SocketIoEvent(name: 'connect_error', data: {'message': msg}));
+        }
+        break;
+      case '2': // event: <ns>[,<json array>]
+        var rest = s.substring(1);
+        if (rest.startsWith('/')) {
+          final idx = rest.indexOf(',');
+          if (idx < 0) return; // no payload
+          rest = rest.substring(idx + 1);
+        }
+        if (rest.isEmpty) return;
+        try {
+          final arr = jsonDecode(rest) as List<dynamic>;
+          final name = arr[0] as String;
+          final data = arr.length > 1 ? arr[1] : null;
+          _events.add(SocketIoEvent(name: name, data: data));
+        } catch (_) {
+          // ignore malformed events
+        }
+        break;
+      default:
+        break;
     }
   }
 
+  /// Parse a Socket.IO payload (`<ns>,<json>` or `<json>`) and pull a
+  /// human-readable `message`/`error` string out of the JSON object.
+  String? _parsePayloadText(String rest) {
+    if (rest.startsWith('/')) {
+      final idx = rest.indexOf(',');
+      if (idx < 0) return null;
+      rest = rest.substring(idx + 1);
+    }
+    if (rest.isEmpty) return null;
+    try {
+      final obj = jsonDecode(rest);
+      if (obj is Map<String, dynamic>) {
+        return obj['message'] as String? ?? obj['error'] as String?;
+      }
+    } catch (_) {
+      // ignore malformed payloads
+    }
+    return null;
+  }
+
   /// Connect to the namespace, supplying [auth] (e.g. `{'token': ...}`).
-  void connectNamespace(Map<String, dynamic> auth) {
+  ///
+  /// Returns a future that completes once the Engine.IO `40<ns>` CONNECT ack
+  /// is received (or completes with an error if the server rejects the
+  /// connection with a `44` connect-error packet). Callers MUST await this
+  /// before emitting any events — emitting before the ack is a protocol
+  /// violation that the server rejects with "Authentication failed".
+  Future<void> connectNamespace(Map<String, dynamic> auth) {
+    if (_connected) return Future.value();
     _send('40$namespace,${jsonEncode(auth)}');
+    return _connectedCompleter.future;
   }
 
   /// Emit a Socket.IO event [event] with a single [data] argument.
@@ -125,6 +168,9 @@ class SocketIoClient {
 
   void _onDone() {
     if (!_opened.isCompleted) _opened.completeError('socket closed');
+    if (!_connectedCompleter.isCompleted) {
+      _connectedCompleter.completeError('socket closed');
+    }
   }
 }
 

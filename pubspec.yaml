@@ -34,6 +34,7 @@ dependencies:
       ref: main
   archive: ^4.0.9
   gbk_codec: ^0.4.0
+  sherpa_onnx: ^1.13.8
 
 dev_dependencies:
   flutter_test:
@@ -43,3 +44,5 @@ dev_dependencies:
 flutter:
   generate: true
   uses-material-design: true
+  assets:
+    - assets/tts/

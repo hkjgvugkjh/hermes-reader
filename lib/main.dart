@@ -16,6 +16,7 @@ import 'reader/services/external_library_dir.dart';
 import 'reader/services/tts_service.dart';
 import 'reader/services/local_tts_source.dart';
 import 'reader/services/server_tts_source.dart';
+import 'reader/services/builtin_tts_source.dart';
 import 'reader/screens/reader_home_screen.dart';
 import 'reader/screens/session_monitor_screen.dart';
 import 'reader/screens/task_list_screen.dart';
@@ -57,11 +58,27 @@ class HermesReaderApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) => TaskProvider()),
         ChangeNotifierProvider(create: (_) => GlobalConfigProvider()),
         ChangeNotifierProvider(create: (_) => ServerProvider()),
-        Provider<TtsService>(
+        ProxyProvider<SessionProvider, TtsService>(
+          // The server engine tunnels /api/hermes/tts/synthesize through the
+          // proxy (reusing the backend JWT from mcu-login), so no direct
+          // backend reachability is needed. When the proxy client is null the
+          // engine reports not-configured and the chain degrades to on-device.
           create: (_) => TtsService(
-            serverSource: _UnavailableServerTts(),
+            serverSource: ServerTtsSource(baseUrl: ''),
             localSource: LocalTtsSource(),
+            builtinSource: BuiltinTtsSource(),
           ),
+          update: (_, session, previous) {
+            previous?.dispose();
+            return TtsService(
+              serverSource: ServerTtsSource(
+                baseUrl: '',
+                proxyClient: session.proxyClient,
+              ),
+              localSource: LocalTtsSource(),
+              builtinSource: BuiltinTtsSource(),
+            );
+          },
           dispose: (_, service) => service.dispose(),
         ),
       ],
@@ -1965,27 +1982,3 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
   }
 }
 
-class _UnavailableServerTts implements SpeechSource {
-  @override
-  SpeechEngine get engine => SpeechEngine.server;
-
-  @override
-  Future<bool> isAvailable() async => false;
-
-  @override
-  Future<void> speak(String text) async {
-    throw Exception('server TTS not configured yet');
-  }
-
-  @override
-  Future<void> stop() async {}
-
-  @override
-  void setProgressHandler(NarrationProgressHandler? handler) {}
-
-  @override
-  Future<void> setRate(double rate) async {}
-
-  @override
-  Future<void> dispose() async {}
-}
