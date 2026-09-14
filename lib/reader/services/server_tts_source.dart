@@ -74,6 +74,11 @@ class ServerTtsSource implements SpeechSource {
   }
 
   @override
+  Future<void> warmUp() async {
+    // Server-side TTS needs no local model loading.
+  }
+
+  @override
   void setProgressHandler(NarrationProgressHandler? handler) {
     // Server TTS does not expose word-level progress.
   }
