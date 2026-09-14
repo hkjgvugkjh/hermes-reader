@@ -270,6 +270,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
           finished = !reader.config.autoTurnPage ? false : true;
           break;
         }
+        // 翻到新页后立即更新播放点，保证中途退出也能从该页续读。
+        await _saveNarration();
         await Future<void>.delayed(const Duration(milliseconds: 600));
         page = reader.currentPage;
       }
