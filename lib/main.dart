@@ -1262,6 +1262,12 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: _openEbook,
             ),
             _BarButton(
+              icon: Icons.folder_special,
+              label: '文库',
+              active: false,
+              onPressed: _openLocalLibrary,
+            ),
+            _BarButton(
               icon: Icons.monitor_heart,
               label: 'Session',
               active: _pageIndex == 0,
