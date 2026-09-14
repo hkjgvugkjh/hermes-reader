@@ -203,9 +203,42 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     // Tell the server TTS engine which backend to forward to (proxy mode).
     tts.setServerId(book.serverId);
 
-    // Resume where the last session stopped, when there is one.
+    // Resume where the last session stopped, when there is one. When the saved
+    // point is on a *different* page, ask whether to continue there or read the
+    // current page instead. The engine is warmed up in the background while the
+    // dialog is open so playback starts without the usual model-load latency.
     final saved = await reader.loadNarration(book.id);
-    if (saved != null && saved.pageIndex < reader.pageCount) {
+    if (saved != null && saved.pageIndex < reader.pageCount && saved.pageIndex != reader.pageIndex) {
+      tts.warmUp();
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('继续朗读？'),
+          content: Text(
+            '上次停在「第 ${saved.pageIndex + 1} 页」。'
+            '要从此处继续，还是从当前页开始？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('thispage'),
+              child: const Text('朗读本页'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop('continue'),
+              child: const Text('继续朗读'),
+            ),
+          ],
+        ),
+      );
+      if (choice == null) return; // 取消，不开始朗读
+      if (choice == 'continue') {
+        reader.goToPage(saved.pageIndex);
+        _spokenBase = saved.charOffset;
+      } else {
+        _spokenBase = 0;
+      }
+    } else if (saved != null && saved.pageIndex < reader.pageCount) {
+      // 历史点恰在当前页：直接续读本页偏移。
       reader.goToPage(saved.pageIndex);
       _spokenBase = saved.charOffset;
     } else {

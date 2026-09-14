@@ -54,6 +54,14 @@ class BuiltinTtsSource implements SpeechSource {
     return _available;
   }
 
+  /// Loads the model into memory without speaking anything, so the first real
+  /// [speak] call starts immediately. Cheap to call repeatedly: once
+  /// [_initialized] is true it returns instantly.
+  @override
+  Future<void> warmUp() async {
+    await _ensureInit();
+  }
+
   @override
   Future<void> speak(String text) async {
     await _ensureInit();
