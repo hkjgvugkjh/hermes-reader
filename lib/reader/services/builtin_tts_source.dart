@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'tts_service.dart';
 import 'builtin_tts_sherpa.dart' show SherpaOnnxImplFactory;
+import 'playback_wait.dart';
 import 'proxy_client.dart';
 
 /// On-device neural TTS bundled with the app.
@@ -40,6 +41,8 @@ class BuiltinTtsSource implements SpeechSource {
   bool _available = false;
   Object? _tts; // sherpa_onnx Tts instance, typed via factory to avoid hard dep.
   String? _modelPath;
+  /// Set by [stop] to abort the per-chunk synthesis loop inside [speak].
+  bool _stopRequested = false;
 
   @override
   SpeechEngine get engine => SpeechEngine.builtin;
@@ -57,19 +60,95 @@ class BuiltinTtsSource implements SpeechSource {
     if (!_available || _tts == null) {
       throw Exception('builtin TTS model not available');
     }
-    final audio = await _sherpaFactory.generate(_tts!, text);
-    debugPrint('builtin speak: playing ${audio.length} bytes');
-    await _player.playBytes(audio, contentType: 'audio/wav');
-    debugPrint('builtin speak: playback started');
+    _stopRequested = false;
+
+    final chunks = _splitForSpeech(text);
+    // Synthesize chunk i+1 inside the Sherpa isolate *while* chunk i is
+    // playing, so the two overlap instead of running back to back. Speech
+    // therefore starts after the first chunk instead of after the whole page.
+    Future<Uint8List>? pending;
+    for (var i = 0; i < chunks.length; i++) {
+      if (_stopRequested) {
+        pending?.ignore();
+        return;
+      }
+      final audio = pending != null
+          ? await pending
+          : await _sherpaFactory.generate(_tts!, chunks[i]);
+      pending = null;
+      if (_stopRequested) return;
+      if (i + 1 < chunks.length) {
+        pending = _sherpaFactory.generate(_tts!, chunks[i + 1]);
+      }
+      debugPrint('builtin speak: playing ${audio.length} bytes (chunk ${i + 1}/${chunks.length})');
+      await _player.playBytes(audio, contentType: 'audio/wav');
+    }
   }
 
   @override
-  Future<void> stop() => _player.stop();
+  Future<void> stop() async {
+    // Also aborts the chunk loop in [speak] — stopping the player alone would
+    // just end the current chunk and let the next one start.
+    _stopRequested = true;
+    await _player.stop();
+  }
 
   @override
   Future<void> setRate(double rate) async {
     // sherpa-onnx Piper does not support live rate changes; speed is baked
     // into the model. No-op until we add a post-process resampler.
+  }
+
+  /// Characters marking a natural place to end a chunk (terminators, clause
+  /// separators, closing quotes, line breaks).
+  static const String _breakChars = '。！？!?；;\n，,、：:)]）」』”’';
+
+  /// Target size of the **first** chunk. Deliberately small: this is the only
+  /// chunk the user actually waits on.
+  static const int _firstChunkChars = 50;
+
+  /// Upper bound for any chunk.
+  static const int _chunkMax = 200;
+
+  /// How much each chunk may grow relative to the previous one.
+  ///
+  /// Synthesis runs at roughly half playback speed on this class of device, so
+  /// a chunk may be up to ~2x its predecessor before its synthesis outlasts the
+  /// previous chunk's playback and an audible gap opens up. 1.7 leaves margin;
+  /// going straight to [_chunkMax] produced a ~4 s hole after the first chunk.
+  static const double _chunkGrowth = 1.7;
+
+  /// Splits [text] into chunks so narration can begin once the first chunk is
+  /// ready, instead of after an entire page has been synthesized.
+  ///
+  /// The first chunk is cut aggressively small; later ones are larger because
+  /// their synthesis overlaps with playback.
+  List<String> _splitForSpeech(String text) {
+    final chunks = <String>[];
+    final buffer = StringBuffer();
+    var limit = _firstChunkChars;
+
+    void flush() {
+      final chunk = buffer.toString().trim();
+      if (chunk.isNotEmpty) chunks.add(chunk);
+      buffer.clear();
+      final grown = (limit * _chunkGrowth).round();
+      limit = grown > _chunkMax ? _chunkMax : grown;
+    }
+
+    for (var i = 0; i < text.length; i++) {
+      final ch = text[i];
+      buffer.write(ch);
+      // Slight headroom, so a chunk only overshoots its target when there is
+      // no break character anywhere nearby.
+      final hard = (limit * 1.2).round();
+      if (buffer.length >= hard ||
+          (_breakChars.contains(ch) && buffer.length >= limit)) {
+        flush();
+      }
+    }
+    flush();
+    return chunks;
   }
 
   @override
@@ -175,6 +254,10 @@ class _JustAudioPort implements AudioPlayerPort {
   Future<void> playBytes(Uint8List bytes, {String? contentType}) async {
     await _player.setAudioSource(_BytesAudioSource(bytes, contentType: contentType));
     await _player.play();
+    // Block until the utterance has actually been spoken. Without this the
+    // caller advances to the next page after a fixed delay and cuts the audio
+    // off mid-sentence. stop() still unblocks this via the state stream.
+    await waitForPlaybackEnd(_player);
   }
 
   @override

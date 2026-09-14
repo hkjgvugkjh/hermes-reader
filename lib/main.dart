@@ -26,6 +26,7 @@ import 'reader/models/global_config.dart';
 import 'reader/services/direct_file_transport.dart';
 import 'reader/services/proxy_file_transport.dart';
 import 'reader/services/proxy_client.dart' as reader_proxy;
+import 'reader/widgets/session_detail_dialog.dart';
 import 'reader/screens/local_library_screen.dart';
 import 'reader/models/hive_models.dart';
 
@@ -1814,8 +1815,33 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
             title: Text(s.title, maxLines: 2, overflow: TextOverflow.ellipsis),
             subtitle: Text(_formatTime(s.lastActivity)),
             trailing: Text(s.state.name, style: const TextStyle(fontSize: 11)),
+            onTap: () => _openSessionDetail(context, activeServer.id, s),
           );
         },
+      ),
+    );
+  }
+
+  /// Opens the Markdown snapshot / reply dialog for a single session.
+  void _openSessionDetail(
+    BuildContext context,
+    String serverId,
+    SessionSnapshot s,
+  ) {
+    final proxyClient = context.read<SessionProvider>().proxyClient;
+    if (proxyClient == null || !proxyClient.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('代理未连接，无法打开会话')),
+      );
+      return;
+    }
+    showDialog(
+      context: context,
+      builder: (_) => SessionDetailDialog(
+        serverId: serverId,
+        sessionId: s.id,
+        title: s.title,
+        proxyClient: proxyClient,
       ),
     );
   }

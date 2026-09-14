@@ -7,6 +7,7 @@ import 'package:hermes_shared/hermes_shared.dart'
 import 'package:just_audio/just_audio.dart';
 
 import 'proxy_client.dart' as reader_proxy;
+import 'playback_wait.dart';
 import 'tts_service.dart';
 
 /// Server-side TTS via hermes-proxy (or, as a fallback, a direct HTTP call to
@@ -107,6 +108,9 @@ class ServerTtsSource implements SpeechSource {
       ),
     );
     await _player.play();
+    // Wait for the utterance to finish so narration is not cut off by the
+    // next page. stop() unblocks this through the state stream.
+    await waitForPlaybackEnd(_player);
   }
 
   Future<void> _speakDirect(String text) async {
@@ -132,6 +136,7 @@ class ServerTtsSource implements SpeechSource {
         AudioSource.uri(Uri.dataFromBytes(bytes, mimeType: mime)),
       );
       await _player.play();
+      await waitForPlaybackEnd(_player);
     } finally {
       client.close();
     }
