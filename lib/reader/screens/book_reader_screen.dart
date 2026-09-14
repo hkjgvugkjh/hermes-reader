@@ -146,6 +146,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       // Leaving mid-sentence should still remember where we were.
       _saveNarration();
     }
+    // Clear this *before* stopping: the narration loop is suspended inside
+    // `await speak()` and re-checks `_narrating` when it returns. `mounted` is
+    // still true while dispose() runs, so without clearing the flag the loop
+    // would advance to the next page and start speaking again after this
+    // screen is gone.
+    _narrating = false;
     _tts?.setProgressHandler(null);
     _tts?.stop();
     context.read<ReaderProvider>().savePosition();

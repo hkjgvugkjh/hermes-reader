@@ -105,7 +105,11 @@ void _sherpaIsolateEntry(SendPort sendPort) {
                   // 因此 dataDir 直接指向 modelDir (内含 phondata/phonindex/phontab/voices/cmn_dict 等)。
                   dataDir: '$modelDir',
                 ),
-                numThreads: 1,
+                // A 700-character page took ~45 s on an 8-core device with one
+                // thread. Parallel inference cuts that to roughly a third;
+                // capped at 4 to stay inside the memory budget of low-end
+                // devices (ONNX allocates per-thread scratch buffers).
+                numThreads: 4,
                 debug: false,
                 provider: 'cpu',
               ),
@@ -143,13 +147,20 @@ Uint8List _encodeWav(Float32List samples, int sampleRate) {
   final fileSize = 36 + dataSize;
   final out = ByteData(44 + dataSize);
   final bytes = out.buffer.asUint8List();
-  final writeTag = (String s) {
-    for (var i = 0; i < s.length; i++) bytes[i] = s.codeUnitAt(i);
-  };
-  writeTag('RIFF');
+  // Each tag must be written at its own offset: a closure that always writes at
+  // index 0 clobbers every previous tag, so the file ends up starting with
+  // 'data' instead of 'RIFF' and ExoPlayer's WavExtractor refuses the stream
+  // ("None of the available extractors ... could read the stream").
+  void writeTag(String s, int offset) {
+    for (var i = 0; i < s.length; i++) {
+      bytes[offset + i] = s.codeUnitAt(i);
+    }
+  }
+
+  writeTag('RIFF', 0);
   out.setUint32(4, fileSize, Endian.little);
-  writeTag('WAVE');
-  writeTag('fmt ');
+  writeTag('WAVE', 8);
+  writeTag('fmt ', 12);
   out.setUint32(16, 16, Endian.little);
   out.setUint16(20, 1, Endian.little); // PCM
   out.setUint16(22, channels, Endian.little);
@@ -157,7 +168,7 @@ Uint8List _encodeWav(Float32List samples, int sampleRate) {
   out.setUint32(28, sampleRate * channels * bitsPerSample ~/ 8, Endian.little);
   out.setUint16(32, channels * bitsPerSample ~/ 8, Endian.little);
   out.setUint16(34, bitsPerSample, Endian.little);
-  writeTag('data');
+  writeTag('data', 36);
   out.setUint32(40, dataSize, Endian.little);
   for (var i = 0; i < samples.length; i++) {
     final s = (samples[i] * 32767).clamp(-32768, 32767).round();
