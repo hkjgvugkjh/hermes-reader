@@ -56,6 +56,11 @@ abstract class SpeechSource {
   Future<void> setRate(double rate);
   Future<void> dispose();
 
+  /// Loads any heavy resources (models, native plugins) without producing audio,
+  /// so the first [speak] starts instantly. Implementations that have nothing to
+  /// preload may leave the default no-op.
+  Future<void> warmUp() async {}
+
   /// Optional: only engines that expose word-level progress implement this.
   void setProgressHandler(NarrationProgressHandler? handler) {}
 
@@ -282,6 +287,22 @@ class TtsService {
   Future<void> _speakWith(SpeechSource source, String text) async {
     await source.setRate(_rate);
     await source.speak(text);
+  }
+
+  /// Preloads engines in the background (model load, native plugin init) so the
+  /// first [speak] after the user picks an option starts without the ~setup
+  /// latency. Each engine's warm-up runs independently and failures are
+  /// swallowed — availability is still decided at speak time.
+  void warmUp() {
+    for (final s in [_server, _local, _builtin]) {
+      if (s == null) continue;
+      try {
+        s.warmUp().catchError((_) {});
+      } catch (_) {
+        // Some engines (server) may start work synchronously; ignore throwaway
+        // failures here.
+      }
+    }
   }
 
   Future<void> stop() async {
