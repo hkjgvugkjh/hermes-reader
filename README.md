@@ -55,6 +55,34 @@
 - 停止朗读时对已停止的引擎异常做静默处理，不再抛出 "all TTS engines failed"
 - 本机引擎对单次朗读设置 2 分钟超时，避免无 TTS 引擎的设备卡死
 
+### 离线 TTS 模型（内置朗读）
+
+本机朗读依赖 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 的 Piper 中文模型，
+**模型文件不入库**（体积约 60 MB），构建/发版时直接放入 `assets/tts/` 即可被打包。
+
+`assets/tts/` 需要的文件：
+
+| 文件                | 说明                              |
+|---------------------|-----------------------------------|
+| `model.onnx`        | 中文 TTS 语音模型（Piper）        |
+| `tokens.txt`        | 音素/token 表                     |
+| `model.onnx.json`   | 模型元信息（采样率、espeak 配置） |
+| `espeak-ng-data.zip`| 音素化所需 espeak-ng 数据         |
+
+**自动下载**（联网环境）：
+
+```bash
+scripts/fetch_tts_model.sh assets/tts
+```
+
+脚本从 sherpa-onnx 官方 release 拉取 `piper-zh_CN-huayan-x_low` 并归一化为上述文件名。
+`espeak-ng-data.zip` 由同一模型包提供，需一并放入 `assets/tts/`。
+
+**手动放置**（离线/CI 环境）：把上述四个文件拷入 `assets/tts/`，无需联网。
+`assets/tts/README.txt` 与 `pubspec.yaml` 的 `assets:` 声明已就绪，重新构建即可生效。
+
+> 缺少模型文件时，内置朗读会回退到系统 `flutter_tts`（无系统引擎则提示不可用）。
+
 ---
 
 ## 支持的文件格式
