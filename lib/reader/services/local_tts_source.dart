@@ -112,6 +112,12 @@ class LocalTtsSource implements SpeechSource {
   }
 
   @override
+  Future<void> warmUp() async {
+    // Prime the FlutterTts plugin / platform engine so the first speak is fast.
+    await _ensureInit();
+  }
+
+  @override
   Future<void> dispose() async {
     try {
       await _tts.stop();
