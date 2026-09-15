@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Brand color used for the native launch screen so cold start does not
+         flash white before the Flutter splash audience appears. -->
+    <color name="launch_brand">#6750A4</color>
+</resources>
