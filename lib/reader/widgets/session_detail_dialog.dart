@@ -102,12 +102,12 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
       headers['Authorization'] = 'Bearer $token';
       // Length only — never log the token itself.
       DebugLogger.instance.info(
-        '会话请求鉴权（server=$widget.serverId）',
+        '会话请求鉴权（server=${widget.serverId}）',
         'source=$source token_len=${token.length}',
       );
     } else {
       DebugLogger.instance.warn(
-        '会话请求缺少鉴权（server=$widget.serverId）',
+        '会话请求缺少鉴权（server=${widget.serverId}）',
         '代理未缓存后端 JWT，且无 authToken 回退；后端将返回 401',
       );
     }
