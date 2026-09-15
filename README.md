@@ -18,6 +18,8 @@
 ### 会话与待办
 
 - **会话清单**：按服务器分组显示会话状态（running / stopped / pending），轮询刷新
+- **会话详情**：点击会话弹出对话框，展示会话快照（历史消息，Markdown 渲染），
+  底部输入框可继续对话并自动刷新快照
 - **状态变更提醒**：会话结束或等待输入时通过本地通知与 Snackbar 提示
 - **待办事项**：展示服务器端任务列表
 
@@ -49,8 +51,11 @@
 - **双引擎**：服务端合成优先，失败或离线自动降级到本机 `flutter_tts`
   （`TtsMode.auto` / `server` / `local`）
 - 降级时在顶部横幅说明原因，不中断朗读
-- 自动翻页朗读：当前页读完且 `autoTurnPage` 开启时自动进入下一页
+- 自动翻页朗读：当前页读完且 `autoTurnPage` 开启时自动进入下一页，翻页同时更新朗读进度
 - **朗读进度记忆**：记录停在第几页、第几个字符，下次朗读从断点续读；读完自动清除
+- **历史播放点选择**：再次点击朗读时若存在其他页的播放点，弹出「继续朗读 / 朗读本页」选择；
+  弹窗期间即在后台预热引擎（加载模型），选定后起播更快
+- 分句流式合成：按标点切分并预取下一句音频，翻页等待显著降低
 - 不支持朗读的格式（`.mobi` `.html` `.json`）按钮置灰并给出提示
 - 停止朗读时对已停止的引擎异常做静默处理，不再抛出 "all TTS engines failed"
 - 本机引擎对单次朗读设置 2 分钟超时，避免无 TTS 引擎的设备卡死
@@ -82,6 +87,16 @@ scripts/fetch_tts_model.sh assets/tts
 `assets/tts/README.txt` 与 `pubspec.yaml` 的 `assets:` 声明已就绪，重新构建即可生效。
 
 > 缺少模型文件时，内置朗读会回退到系统 `flutter_tts`（无系统引擎则提示不可用）。
+
+### 错误提示与日志
+
+- **人性化错误提示**：网络切换、断连、超时、DNS 失败、服务器 4xx/5xx 等统一映射为
+  中文友好文案（如「连接被中断（网络可能已切换），请重试」），不再把
+  `SocketException` / `WebSocketChannelException` 原始堆栈直接展示给用户
+- 提示采用浮动 SnackBar + 分类图标，可选「重试」动作
+- **日志落盘**：日志同时写入用户存储 `<documents>/hermes_logs/hermes-YYYY-MM-DD.log`，
+  按天分文件、追加写入、自动保留最近 7 天；原始技术细节进日志，界面只显示摘要。
+  方便网络异常后回溯诊断。
 
 ---
 
@@ -148,3 +163,46 @@ flutter run -d <device-id>       # 或一步到位
 发版时再出 release：`flutter build apk --release`（约需数分钟）。
 
 调试桌面上可直接 `flutter run -d linux`。
+
+---
+
+## 更新说明
+
+### 2026-09 迭代
+
+**会话**
+
+- 新增会话详情对话框：展示会话快照（历史消息，Markdown 渲染，代码块等宽灰底），
+  底部输入框可续聊并自动刷新。
+- 修复读取会话快照 `HTTP 401 未授权`：请求未携带 `Authorization`。现优先使用
+  代理下发的后端 JWT（`ProxyClient.backendJWT`），缺失时回退到服务器 `authToken`。
+
+**语音朗读**
+
+- 修复内置引擎无声根因：WAV 头写入时 `RIFF/WAVE/fmt/data` 标签互相覆盖，文件头被写坏，
+  播放器报 `UnrecognizedInputFormatException`。
+- 播放改为等待播放完成（监听 `ProcessingState.completed`），不再用固定延时打断；
+  分句流式合成（首块 50 字、块长 1.7 倍递增），翻页起播延迟由数十秒降至约 1 秒。
+- 新增历史播放点选择（继续朗读 / 朗读本页），弹窗期间后台预热引擎。
+- 自动翻页时同步更新播放点，中途退出也能从最新页续读。
+- 修复退出阅读页后仍在朗读的问题（`dispose` 前清除朗读状态）。
+- 推理线程数 `1 → 4`，提升合成速度。
+
+**界面**
+
+- 底部菜单正中间新增「本地文库」入口。
+
+**健壮性**
+
+- 新增统一错误映射与提示组件，各类网络/服务器异常以人性化中文文案呈现。
+- 日志落盘到用户存储（`<documents>/hermes_logs/`，按天分文件，保留 7 天）。
+
+**服务端（hermes-proxy / hermes-shared，配套改动）**
+
+- hermes-proxy 内嵌 sherpa-onnx 引擎，作为「自建 TTS」直接提供
+  `/api/hermes/tts/{synthesize,voices,settings}`，无需下游后端；
+  通过保留 serverID `__tts__` 路由，模型置于 `models/tts/`。
+- hermes-shared 对称封装上述能力：导出 `localTtsServerId`（`__tts__`），
+  `HermesTtsClient` 对下游 studio 与代理自建引擎使用同一套 API。
+- 端到端实机测试：`hermes-shared/test/tts_e2e_live_test.dart`（`PROXY_E2E=1 flutter test`）。
+
