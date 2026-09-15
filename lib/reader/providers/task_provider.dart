@@ -7,7 +7,9 @@ class TaskItem {
   final String description;
   final String serverId;
   final DateTime createdAt;
+  final DateTime? timeoutAt; // null = never expires
   final TaskPriority priority;
+  final List<String> choices; // options offered to the user (DI 0x39)
   bool resolved;
 
   TaskItem({
@@ -16,9 +18,23 @@ class TaskItem {
     required this.description,
     required this.serverId,
     required this.createdAt,
+    this.timeoutAt,
     this.priority = TaskPriority.normal,
+    this.choices = const [],
     this.resolved = false,
   });
+
+  /// Whether this task has passed its timeout deadline.
+  bool get isExpired {
+    if (timeoutAt == null) return false;
+    return DateTime.now().isAfter(timeoutAt!);
+  }
+
+  /// Remaining seconds until timeout; negative if already expired; -1 if none.
+  int get remainingSeconds {
+    if (timeoutAt == null) return -1;
+    return timeoutAt!.difference(DateTime.now()).inSeconds;
+  }
 }
 
 enum TaskPriority { low, normal, high, urgent }

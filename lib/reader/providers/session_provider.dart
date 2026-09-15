@@ -7,6 +7,7 @@ import '../services/proxy_client.dart' as reader_proxy;
 import '../services/socket_io_client.dart';
 import '../services/hermes_api_client.dart';
 import '../services/voice_command_service.dart';
+import '../providers/task_provider.dart';
 import '../models/hive_models.dart';
 
 /// Owns the [SessionMonitorService] and exposes its state to the UI.
@@ -17,9 +18,11 @@ class SessionProvider extends ChangeNotifier {
 
   StreamSubscription<SessionChange>? _changeSub;
   StreamSubscription<Map<String, dynamic>>? _diSub;
+  StreamSubscription<Map<String, dynamic>>? _authSub;
   final List<SessionChange> _recentChanges = [];
   bool _initialized = false;
   reader_proxy.ProxyClient? _proxyClient;
+  TaskProvider? _taskProvider;
 
   List<SessionChange> get recentChanges => List.unmodifiable(_recentChanges);
   bool get isInitialized => _initialized;
@@ -374,9 +377,55 @@ class SessionProvider extends ChangeNotifier {
   void setProxyClient(reader_proxy.ProxyClient client) {
     _proxyClient = client;
     _diSub = client.sessionUpdates.listen(_onDIUpdate);
+    // Subscribe to backend authorization requests (DI 0x39) and surface them
+    // as pending tasks in 待处理事项.
+    _authSub = client.authRequests.listen(_onDIAuthRequest);
     // Also pass to monitor service for DI polling
     _monitor?.setProxyClient(client);
     notifyListeners();
+  }
+
+  /// Bind the TaskProvider so DI auth requests can be surfaced as tasks.
+  void setTaskProvider(TaskProvider provider) {
+    _taskProvider = provider;
+  }
+
+  /// Handle a DI authorization request (0x39) pushed by the proxy and turn it
+  /// into a pending task in 待处理事项.
+  void _onDIAuthRequest(Map<String, dynamic> req) {
+    final taskProvider = _taskProvider;
+    if (taskProvider == null) return;
+
+    final reqId = (req['req_id'] ?? req['id'] ?? '').toString();
+    final serverId = (req['server_id'] ?? req['source'] ?? '').toString();
+    if (reqId.isEmpty) return;
+
+    final prompt = (req['prompt'] ?? req['message'] ?? req['desc'] ?? '需要您确认')
+        .toString();
+    final title = (req['title'] ??
+            req['name'] ??
+            (prompt.length > 20 ? prompt.substring(0, 20) : prompt))
+        .toString();
+    final choicesRaw = req['choices'];
+    final List<String> choices = choicesRaw is List
+        ? choicesRaw.map((e) => e.toString()).toList()
+        : <String>[];
+    final timeoutMs = req['timeout_ms'];
+    final DateTime? timeoutAt = timeoutMs is int
+        ? DateTime.now().add(Duration(milliseconds: timeoutMs))
+        : null;
+
+    final task = TaskItem(
+      id: reqId,
+      title: title,
+      description: prompt,
+      serverId: serverId,
+      createdAt: DateTime.now(),
+      timeoutAt: timeoutAt,
+      priority: TaskPriority.high,
+      resolved: false,
+    );
+    taskProvider.addTask(task);
   }
 
   void _onDIUpdate(Map<String, dynamic> update) {
@@ -463,6 +512,8 @@ class SessionProvider extends ChangeNotifier {
   void clearProxyClient() {
     _diSub?.cancel();
     _diSub = null;
+    _authSub?.cancel();
+    _authSub = null;
     _proxyClient = null;
     _monitor?.clearProxyClient();
     notifyListeners();
@@ -472,6 +523,7 @@ class SessionProvider extends ChangeNotifier {
   void dispose() {
     _changeSub?.cancel();
     _diSub?.cancel();
+    _authSub?.cancel();
     _monitor?.dispose();
     super.dispose();
   }
