@@ -91,9 +91,25 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
     final headers = <String, String>{};
     if (json) headers['Content-Type'] = 'application/json';
     final jwt = widget.proxyClient.backendJWT(widget.serverId);
-    final token = (jwt != null && jwt.isNotEmpty) ? jwt : widget.fallbackToken;
+    final hasJwt = jwt != null && jwt.isNotEmpty;
+    final token = hasJwt ? jwt : widget.fallbackToken;
+    final source = hasJwt
+        ? 'backend-jwt'
+        : (widget.fallbackToken != null && widget.fallbackToken!.isNotEmpty
+            ? 'server-auth-token'
+            : 'none');
     if (token != null && token.isNotEmpty) {
       headers['Authorization'] = 'Bearer $token';
+      // Length only — never log the token itself.
+      DebugLogger.instance.info(
+        '会话请求鉴权（server=$widget.serverId）',
+        'source=$source token_len=${token.length}',
+      );
+    } else {
+      DebugLogger.instance.warn(
+        '会话请求缺少鉴权（server=$widget.serverId）',
+        '代理未缓存后端 JWT，且无 authToken 回退；后端将返回 401',
+      );
     }
     return headers;
   }

@@ -195,9 +195,14 @@ class _StartupScreenState extends State<StartupScreen> {
     // Test HTTP connectivity first
     _addCheck('测试 HTTP 连通性');
     try {
-      final httpScheme = globalConfig.config.proxyUrl.startsWith('https') ? 'https' : 'http';
-      final host = Uri.parse(globalConfig.config.proxyUrl).host;
-      final healthUrl = '$httpScheme://$host/health';
+      // NOTE: keep the port! The proxy serves /health on the same listener as
+      // the WebSocket (e.g. :8649). Dropping it made the probe hit :80 and
+      // fail, while the in-app WebSocket (which uses proxyWsUrl) still worked.
+      final uri = Uri.parse(globalConfig.config.proxyUrl);
+      final httpScheme =
+          (uri.scheme == 'wss' || uri.scheme == 'https') ? 'https' : 'http';
+      final portPart = (uri.hasPort && uri.port > 0) ? ':${uri.port}' : '';
+      final healthUrl = '$httpScheme://${uri.host}$portPart/health';
       final resp = await http.get(Uri.parse(healthUrl)).timeout(const Duration(seconds: 10));
       if (resp.statusCode == 200) {
         _passCheck();
@@ -1844,11 +1849,11 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
   }
 
   /// Opens the Markdown snapshot / reply dialog for a single session.
-  void _openSessionDetail(
+  Future<void> _openSessionDetail(
     BuildContext context,
     String serverId,
     SessionSnapshot s,
-  ) {
+  ) async {
     final proxyClient = context.read<SessionProvider>().proxyClient;
     if (proxyClient == null || !proxyClient.isConnected) {
       UiFeedback.showInfo(context, '代理未连接，无法打开会话');
@@ -1857,13 +1862,34 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
     // Fall back to the server's own auth token if the proxy has no backend JWT
     // cached for it; without some Authorization the Studio API answers 401.
     final serverProvider = context.read<ServerProvider>();
-    String? fallbackToken;
+    ServerConfig? server;
     for (final srv in serverProvider.servers) {
       if (srv.id == serverId) {
-        fallbackToken = srv.authToken;
+        server = srv;
         break;
       }
     }
+
+    // Make sure we have a backend JWT for this server. connectServer() performs
+    // mcu-login and caches the JWT the Studio API expects; without it the
+    // snapshot request answers 401. Best-effort: failures fall back to the
+    // server auth token below.
+    if (proxyClient.backendJWT(serverId) == null && server != null) {
+      try {
+        await proxyClient.connectServer(
+          serverId,
+          username: server.username,
+          password: server.password,
+          profile: server.profile,
+        );
+        DebugLogger.instance.info('已为 $serverId 获取后端 JWT（打开会话详情前）');
+      } catch (e) {
+        DebugLogger.instance.warn(
+            '获取后端 JWT 失败（$serverId）', describeError(e).detail);
+      }
+    }
+    if (!mounted) return;
+
     showDialog(
       context: context,
       builder: (_) => SessionDetailDialog(
@@ -1871,7 +1897,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
         sessionId: s.id,
         title: s.title,
         proxyClient: proxyClient,
-        fallbackToken: fallbackToken,
+        fallbackToken: server?.authToken,
       ),
     );
   }
