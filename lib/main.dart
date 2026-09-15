@@ -10,6 +10,7 @@ import 'reader/providers/session_provider.dart';
 import 'reader/providers/task_provider.dart';
 import 'reader/providers/global_config_provider.dart';
 import 'reader/providers/server_provider.dart';
+import 'reader/providers/debug_logger.dart';
 import 'reader/services/library_service.dart';
 import 'reader/services/reader_config_storage.dart';
 import 'reader/services/external_library_dir.dart';
@@ -29,8 +30,15 @@ import 'reader/services/proxy_client.dart' as reader_proxy;
 import 'reader/widgets/session_detail_dialog.dart';
 import 'reader/screens/local_library_screen.dart';
 import 'reader/models/hive_models.dart';
+import 'reader/utils/error_messages.dart';
+import 'reader/utils/ui_feedback.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Start mirroring logs to the user's documents directory (hermes_logs/).
+  // Fire-and-forget: logging works from memory even if this fails.
+  unawaited(DebugLogger.instance.ensureInitialized());
+  debugPrint('hermes-reader starting; log dir will be under documents/hermes_logs');
   runApp(const HermesReaderApp());
 }
 
@@ -170,7 +178,7 @@ class _StartupScreenState extends State<StartupScreen> {
       await globalConfig.load();
       _passCheck();
     } catch (e) {
-      _failCheck(e.toString());
+      _failCheckError(e, '读取本地配置');
       _navigateToLocal();
       return;
     }
@@ -194,10 +202,10 @@ class _StartupScreenState extends State<StartupScreen> {
       if (resp.statusCode == 200) {
         _passCheck();
       } else {
-        _failCheck('HTTP ${resp.statusCode}');
+        _failCheck('代理服务响应异常（HTTP ${resp.statusCode}）');
       }
     } catch (e) {
-      _failCheck(e.toString());
+      _failCheckError(e, '测试 HTTP 连通性');
       _navigateToLocal();
       return;
     }
@@ -223,7 +231,7 @@ class _StartupScreenState extends State<StartupScreen> {
         servers = await proxyClient.fetchServersDI();
         _passCheck('${servers.length} 个服务器');
       } catch (e) {
-        _failCheck('获取失败: $e');
+        _failCheckError(e, '获取服务器列表');
       }
 
       if (mounted) {
@@ -234,9 +242,17 @@ class _StartupScreenState extends State<StartupScreen> {
       if (!mounted) return;
       _navigateToOnline();
     } catch (e) {
-      _failCheck(e.toString());
+      _failCheckError(e, '连接 WebSocket');
       _navigateToLocal();
     }
+  }
+
+  /// Fails the current startup check with a friendly message and logs the raw
+  /// error to the log file.
+  void _failCheckError(Object error, String stage) {
+    final fe = describeError(error);
+    DebugLogger.instance.error('启动检查失败：$stage', '${fe.message} :: ${fe.detail}');
+    _failCheck('$stage：${fe.message}');
   }
 
   void _addCheck(String label, {bool skip = false}) {
@@ -460,9 +476,7 @@ class _HomeScreenState extends State<HomeScreen> {
         },
         onFailed: (error) {
           Navigator.pop(ctx);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('连接失败: $error')),
-          );
+          UiFeedback.showError(context, error, context_: '连接代理');
         },
         onCancel: () {
           Navigator.pop(ctx);
@@ -562,13 +576,10 @@ class _HomeScreenState extends State<HomeScreen> {
         profile: server.profile,
       )
           .then((_) {
-        debugPrint('[SWITCH] attached ${server.id}');
+        DebugLogger.instance.info('已连接服务器 ${server.name}');
       }).catchError((Object e) {
-        debugPrint('[SWITCH] attach ${server.id} failed: $e');
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('无法连接 ${server.name}: $e')),
-        );
+        UiFeedback.showError(context, e, context_: '连接服务器 ${server.name}');
       }),
     );
   }
@@ -1440,12 +1451,16 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
       }
       serverProvider.setServerOnline(serverId, true);
     } catch (e) {
-      print('[FETCH1] failed $serverId: $e');
+      final fe = describeError(e);
+      DebugLogger.instance.error(
+        '拉取会话失败（服务器 $serverId）',
+        '${fe.message} :: ${fe.detail}',
+      );
       if (mounted && !quiet) {
         setState(() {
           _serverSessions[serverId] = [];
           _loading = false;
-          _error = 'Server $serverId: $e';
+          _error = fe.message;
         });
       }
       serverProvider.setServerOnline(serverId, false);
