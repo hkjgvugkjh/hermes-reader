@@ -1851,10 +1851,18 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
   ) {
     final proxyClient = context.read<SessionProvider>().proxyClient;
     if (proxyClient == null || !proxyClient.isConnected) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('代理未连接，无法打开会话')),
-      );
+      UiFeedback.showInfo(context, '代理未连接，无法打开会话');
       return;
+    }
+    // Fall back to the server's own auth token if the proxy has no backend JWT
+    // cached for it; without some Authorization the Studio API answers 401.
+    final serverProvider = context.read<ServerProvider>();
+    String? fallbackToken;
+    for (final srv in serverProvider.servers) {
+      if (srv.id == serverId) {
+        fallbackToken = srv.authToken;
+        break;
+      }
     }
     showDialog(
       context: context,
@@ -1863,6 +1871,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
         sessionId: s.id,
         title: s.title,
         proxyClient: proxyClient,
+        fallbackToken: fallbackToken,
       ),
     );
   }

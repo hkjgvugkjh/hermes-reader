@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
+import '../providers/debug_logger.dart';
 import '../services/proxy_client.dart' as reader_proxy;
+import '../utils/error_messages.dart';
 
 /// One entry of a session transcript.
 class _SessionMessage {
@@ -40,12 +42,19 @@ class SessionDetailDialog extends StatefulWidget {
     required this.sessionId,
     required this.title,
     required this.proxyClient,
+    this.fallbackToken,
   });
 
   final String serverId;
   final String sessionId;
   final String title;
   final reader_proxy.ProxyClient proxyClient;
+
+  /// Used for `Authorization` only when the proxy did not issue a backend JWT
+  /// (i.e. [ProxyClient.backendJWT] is null). The Studio API rejects the reader
+  /// proxy token for some routes but accepts it for others, so we mirror the
+  /// fallback used by [SessionProvider].
+  final String? fallbackToken;
 
   @override
   State<SessionDetailDialog> createState() => _SessionDetailDialogState();
@@ -73,6 +82,22 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
     super.dispose();
   }
 
+  /// Builds request headers with the per-server backend JWT attached.
+  ///
+  /// The Hermes Studio API requires `Authorization: Bearer <backend_jwt>`;
+  /// without it the backend answers 401. The JWT is issued by the proxy during
+  /// `connectServer` (mcu-login) and cached inside the ProxyClient.
+  Map<String, String> _authHeaders({bool json = false}) {
+    final headers = <String, String>{};
+    if (json) headers['Content-Type'] = 'application/json';
+    final jwt = widget.proxyClient.backendJWT(widget.serverId);
+    final token = (jwt != null && jwt.isNotEmpty) ? jwt : widget.fallbackToken;
+    if (token != null && token.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $token';
+    }
+    return headers;
+  }
+
   /// The proxy returns the response body base64-encoded.
   String _decodeBody(Object? body) {
     if (body == null) return '';
@@ -97,11 +122,22 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
         serverId: widget.serverId,
         method: 'GET',
         path: '/api/studio/sessions/${widget.sessionId}/context',
+        headers: _authHeaders(),
       );
       final code = resp['status_code'] as int? ?? 0;
       final text = _decodeBody(resp['body']);
       if (code < 200 || code >= 300) {
-        throw Exception('HTTP $code ${_summarize(text)}');
+        final detail = _summarize(text);
+        DebugLogger.instance.error(
+          '读取会话快照失败（HTTP $code）',
+          'session=${widget.sessionId}${detail.isEmpty ? '' : ' :: $detail'}',
+        );
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = describeError('HTTP status code $code').message;
+        });
+        return;
       }
       final data = jsonDecode(text) as Map<String, dynamic>;
       final raw = data['messages'] as List? ?? const [];
@@ -122,9 +158,11 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
       _scrollToBottom();
     } catch (e) {
       if (!mounted) return;
+      final fe = describeError(e);
+      DebugLogger.instance.error('读取会话快照失败', fe.detail);
       setState(() {
         _loading = false;
-        _error = '$e';
+        _error = fe.message;
       });
     }
   }
@@ -155,7 +193,7 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
         serverId: widget.serverId,
         method: 'POST',
         path: '/api/studio/chat-run/runs',
-        headers: const {'Content-Type': 'application/json'},
+        headers: _authHeaders(json: true),
         body: utf8.encode(jsonEncode({
           'input': text,
           'session_id': widget.sessionId,
@@ -166,13 +204,23 @@ class _SessionDetailDialogState extends State<SessionDetailDialog> {
       );
       final code = resp['status_code'] as int? ?? 0;
       if (code < 200 || code >= 300) {
-        throw Exception('HTTP $code ${_summarize(_decodeBody(resp['body']))}');
+        final detail = _summarize(_decodeBody(resp['body']));
+        DebugLogger.instance.error('发送消息失败（HTTP $code）',
+            'session=${widget.sessionId}${detail.isEmpty ? '' : ' :: $detail'}');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(describeError('HTTP status code $code').message)),
+          );
+        }
+        return;
       }
       await _load(quiet: true);
     } catch (e) {
+      final fe = describeError(e);
+      DebugLogger.instance.error('发送消息失败', fe.detail);
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('发送失败: ${_summarize('$e')}')));
+            .showSnackBar(SnackBar(content: Text(fe.message)));
       }
     } finally {
       if (mounted) setState(() => _sending = false);
