@@ -266,7 +266,7 @@ packages:
     description:
       path: "."
       ref: main
-      resolved-ref: b7e110314a1ee22b4750bb46a41f416a796c9a05
+      resolved-ref: "1c03e516055bf939cec758486754f9c1dc8896d6"
       url: "https://github.com/hkjgvugkjh/hermes-shared.git"
     source: git
     version: "1.0.0"
