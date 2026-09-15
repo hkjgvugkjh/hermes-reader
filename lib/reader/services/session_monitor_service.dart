@@ -87,10 +87,18 @@ class SessionSnapshot {
     }
     if (json['completed'] == true) return SessionState.stopped;
 
-    // Hermes DI only reports `last_active`; infer from recency.
-    final last = _parseTime(json);
-    final idle = DateTime.now().difference(last).inSeconds;
-    if (idle < 0 || idle > activityTtlSeconds) return SessionState.stopped;
+    // No explicit status field (e.g. a proxy that only reports `last_active`).
+    // Prefer recency, but default to running rather than stopped: showing an
+    // actually-running session as "stopped" is worse than the reverse.
+    final rawActive = json['last_active'] ??
+        json['last_active_at'] ??
+        json['updated_at'] ??
+        json['updatedAt'];
+    if (rawActive != null) {
+      final last = _parseTime(json);
+      final idle = DateTime.now().difference(last).inSeconds;
+      if (idle >= 0 && idle > activityTtlSeconds) return SessionState.stopped;
+    }
     return SessionState.running;
   }
 }
