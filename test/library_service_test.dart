@@ -139,6 +139,30 @@ void main() {
   LibraryService _service({LibrarySandbox? sandbox}) =>
       LibraryService(storage: storage, sandbox: sandbox ?? const _RelaxedSandbox());
 
+  group('DownloadProgress labels (shown on the shelf tile)', () {
+    test('renders "received / total" plus the live rate', () {
+      const p = DownloadProgress(
+        received: 1536 * 1024,
+        total: 5 * 1024 * 1024,
+        rateBps: 320 * 1024,
+      );
+      expect(p.sizeLabel, '1.5 MB / 5.0 MB');
+      expect(p.rateLabel, '320.0 KB/s');
+      expect(p.fraction, closeTo(0.293, 0.01));
+    });
+
+    test('omits the total when the server did not declare a size', () {
+      const p = DownloadProgress(received: 2048, total: 0, rateBps: 0);
+      expect(p.sizeLabel, '2.0 KB');
+      expect(p.fraction, 0.0);
+    });
+
+    test('shows a placeholder rate until a measurement exists', () {
+      const p = DownloadProgress(received: 100, total: 0, rateBps: 0);
+      expect(p.rateLabel, '—');
+    });
+  });
+
   test('a range-capable transport downloads in chunks and reports progress',
       () async {
     // 32 bytes served in 8-byte chunks via a transport that ignores the

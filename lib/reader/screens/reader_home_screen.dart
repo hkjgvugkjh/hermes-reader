@@ -102,6 +102,7 @@ class _ReaderHomeScreenState extends State<ReaderHomeScreen> {
                   cached: library.isCached(book),
                   downloading: library.isDownloading(book.id),
                   progress: library.progressFor(book.id),
+                  stats: library.downloadStatsFor(book.id),
                   saved: saved,
                   onTap: () => _openBook(context, book),
                   onRestart: saved == null
@@ -214,6 +215,7 @@ class _BookTile extends StatelessWidget {
     required this.book,
     required this.cached,
     required this.progress,
+    required this.stats,
     required this.saved,
     required this.onTap,
     required this.onRestart,
@@ -225,6 +227,7 @@ class _BookTile extends StatelessWidget {
   final Book book;
   final bool cached;
   final double progress;
+  final DownloadProgress? stats;
   final ReadingProgress? saved;
   final VoidCallback onTap;
   final VoidCallback? onRestart;
@@ -264,6 +267,22 @@ class _BookTile extends StatelessWidget {
                 value: progress > 0 ? progress : null,
               ),
             ),
+          // Downloaded-so-far and live transfer rate, so a long download shows
+          // movement instead of an indeterminate bar. Falls back to a hint
+          // before the first chunk lands and the numbers exist.
+          if (downloading)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                _progressLine(stats),
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
         ],
       ),
       trailing: Row(
@@ -297,6 +316,17 @@ class _BookTile extends StatelessWidget {
       ),
       onTap: onTap,
     );
+  }
+
+  /// Builds the "1.2 MB / 5.0 MB · 320 KB/s" line shown while downloading.
+  ///
+  /// Returns a placeholder before the first chunk arrives, when neither the
+  /// byte counts nor the rate are meaningful yet.
+  static String _progressLine(DownloadProgress? stats) {
+    if (stats == null) return '下载中…';
+    final size = stats.sizeLabel;
+    final rate = stats.rateBps > 0 ? '  ·  ${stats.rateLabel}' : '';
+    return '$size$rate';
   }
 }
 

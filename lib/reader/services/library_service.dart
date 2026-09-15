@@ -282,6 +282,15 @@ class LibraryService {
     sandbox.checkTransfer(book.sizeBytes);
 
     final type = _typeOf(book);
+    // Announce the transfer before the first byte arrives. The declared size is
+    // already known from the listing, so the UI can show "0 B / 12.5 MB" right
+    // away instead of an indeterminate bar that looks stuck while the proxy
+    // seeds its buffer for the first slice.
+    onProgress?.call(DownloadProgress(
+      received: 0,
+      total: book.sizeBytes,
+      rateBps: 0,
+    ));
     final bytes = transport.supportsRange
         ? await _fetchChunked(transport, safePath, type,
             expectedBytes: book.sizeBytes, onProgress: onProgress)
