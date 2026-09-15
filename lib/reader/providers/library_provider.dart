@@ -44,6 +44,11 @@ class LibraryProvider extends ChangeNotifier {
   final Map<String, double> _progress = {};
   double progressFor(String bookId) => _progress[bookId] ?? 0.0;
 
+  /// Live download stats keyed by book id, so the UI can show
+  /// "downloaded x of y" and the current transfer rate.
+  final Map<String, DownloadProgress> _dl = {};
+  DownloadProgress? downloadStatsFor(String bookId) => _dl[bookId];
+
   /// Which server's listing is currently shown.
   String? _activeServerId;
   String? get activeServerId => _activeServerId;
@@ -105,6 +110,11 @@ class LibraryProvider extends ChangeNotifier {
     _error = null;
     _downloading.add(book.id);
     _progress[book.id] = 0.0;
+    _dl[book.id] = DownloadProgress(
+      received: 0,
+      total: book.sizeBytes,
+      rateBps: 0,
+    );
     notifyListeners();
 
     try {
@@ -112,6 +122,13 @@ class LibraryProvider extends ChangeNotifier {
         transport: transport,
         book: book,
         encoding: encoding,
+        onProgress: (p) {
+          _progress[book.id] = p.total > 0
+              ? p.fraction
+              : (p.received > 0 ? 0.01 : 0.0);
+          _dl[book.id] = p;
+          notifyListeners();
+        },
       );
       _cached.add(book.id);
       _progress[book.id] = 1.0;
@@ -124,6 +141,7 @@ class LibraryProvider extends ChangeNotifier {
       return null;
     } finally {
       _downloading.remove(book.id);
+      _dl.remove(book.id);
       notifyListeners();
     }
   }

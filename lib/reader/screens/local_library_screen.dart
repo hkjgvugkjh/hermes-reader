@@ -11,6 +11,7 @@ import '../providers/library_provider.dart';
 import '../providers/local_library_provider.dart';
 import '../providers/server_provider.dart';
 import '../services/external_library_dir.dart';
+import '../services/library_service.dart' show DownloadProgress;
 import '../services/proxy_client.dart';
 import 'book_reader_screen.dart';
 
@@ -460,6 +461,9 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
                           book: book,
                           isLocal: section.isLocal,
                           cached: _provider.isCached(book),
+                          downloading: _provider.isDownloading(book.id),
+                          progress: _provider.progressFor(book.id),
+                          stats: _provider.downloadStatsFor(book.id),
                           onOpen: () => _openBook(context, book),
                           onRename: section.isLocal ? () => _rename(context, book) : null,
                           onDelete: section.isLocal ? () => _delete(context, book) : null,
@@ -531,6 +535,9 @@ class _BookCard extends StatelessWidget {
     required this.isLocal,
     required this.cached,
     required this.onOpen,
+    this.downloading = false,
+    this.progress = 0.0,
+    this.stats,
     this.onRename,
     this.onDelete,
     this.onForward,
@@ -541,6 +548,9 @@ class _BookCard extends StatelessWidget {
   final Book book;
   final bool isLocal;
   final bool cached;
+  final bool downloading;
+  final double progress;
+  final DownloadProgress? stats;
   final VoidCallback onOpen;
   final VoidCallback? onRename;
   final VoidCallback? onDelete;
@@ -555,7 +565,7 @@ class _BookCard extends StatelessWidget {
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: onOpen,
+        onTap: downloading ? null : onOpen,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -572,12 +582,44 @@ class _BookCard extends StatelessWidget {
                 ),
               ),
             ),
+            if (downloading)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    LinearProgressIndicator(
+                      value: progress > 0 ? progress : null,
+                      minHeight: 3,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      stats?.sizeLabel ?? '下载中…',
+                      style: const TextStyle(fontSize: 10),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      stats?.rateLabel ?? '',
+                      style: const TextStyle(fontSize: 10, color: Colors.blueGrey),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               child: Row(
                 children: [
                   if (isLocal)
                     const Icon(Icons.folder, size: 16, color: Colors.blueGrey)
+                  else if (downloading)
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   else if (cached)
                     const Icon(Icons.check_circle, size: 16, color: Colors.green)
                   else

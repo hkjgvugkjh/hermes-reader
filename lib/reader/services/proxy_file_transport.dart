@@ -41,9 +41,10 @@ class ProxyFileTransport implements FileTransport {
   Future<TransportResponse> get(
     String path, {
     Map<String, String>? headers,
+    int? expectedBytes,
   }) async {
     try {
-      return await _get(path, headers);
+      return await _get(path, headers, expectedBytes);
     } catch (e) {
       // A socket that died since the last request fails here rather than at
       // the caller. One reconnect keeps a dropped Wi-Fi handover from looking
@@ -54,7 +55,54 @@ class ProxyFileTransport implements FileTransport {
       _attached = false;
       proxyClient.disconnect();
       await proxyClient.connect();
-      return _get(path, headers);
+      return _get(path, headers, expectedBytes);
+    }
+  }
+
+  /// The proxy serves byte ranges for studio file reads, so the library can
+  /// stream a book in chunks and report progress.
+  @override
+  bool get supportsRange => true;
+
+  /// Per-chunk timeout for a ranged read. A slice is at most 1 MiB, so even a
+  /// slow link finishes well within this; a stall here is a real failure worth
+  /// reporting rather than waiting out the (much longer) whole-file cap.
+  static const Duration _chunkTimeout = Duration(seconds: 90);
+
+  /// Fetches a byte range by adding `offset`/`limit` to the read path. The
+  /// proxy reads the whole file once (buffering it), then serves each slice
+  /// from memory with `X-Hermes-Total` telling us the full size.
+  ///
+  /// The first slice may take longer than the rest because the proxy has to
+  /// fetch the whole file upstream to seed its buffer, so it gets a larger
+  /// allowance than the follow-up slices.
+  @override
+  Future<TransportResponse> getRange(
+    String path, {
+    required int offset,
+    required int length,
+    Map<String, String>? headers,
+    int? expectedBytes,
+  }) async {
+    final uri = Uri.parse(path);
+    final query = Map<String, String>.from(uri.queryParameters)
+      ..['offset'] = '$offset'
+      ..['limit'] = '$length';
+    final ranged = Uri(
+      path: uri.path,
+      queryParameters: query,
+    ).toString();
+    // First slice seeds the proxy buffer from upstream (whole file), so scale
+    // its cap like a full download; later slices are cheap buffer reads.
+    final timeout = offset == 0 ? _requestTimeout(expectedBytes) : _chunkTimeout;
+    try {
+      return await _get(ranged, headers, expectedBytes, timeout: timeout);
+    } catch (e) {
+      if (!_looksLikeConnectionFailure(e)) rethrow;
+      _attached = false;
+      proxyClient.disconnect();
+      await proxyClient.connect();
+      return _get(ranged, headers, expectedBytes, timeout: timeout);
     }
   }
 
@@ -83,10 +131,34 @@ class ProxyFileTransport implements FileTransport {
         text.contains('timed out');
   }
 
+  /// Minimum throughput we assume a healthy download can sustain. As long as
+  /// the real rate stays above this, the adaptive timeout below is never hit,
+  /// so large books no longer trip the old fixed 30s cap.
+  static const int _minThroughputBps = 10 * 1024; // 10 KB/s
+
+  /// Adaptive request timeout.
+  ///
+  /// A large book downloading at >= 10 KB/s should never be reported as timed
+  /// out. We therefore size the cap from the declared file size at that minimum
+  /// rate: a 50 MB book gets ~5000s. Unknown sizes fall back to the underlying
+  /// 5-minute transport timeout so we never kill a request we can't judge.
+  Duration _requestTimeout(int? expectedBytes) {
+    const floor = Duration(seconds: 30);
+    if (expectedBytes == null || expectedBytes <= 0) {
+      return const Duration(minutes: 5);
+    }
+    final byRate = Duration(
+      seconds: (expectedBytes / _minThroughputBps).ceil(),
+    );
+    return byRate > floor ? byRate : floor;
+  }
+
   Future<TransportResponse> _get(
     String path,
     Map<String, String>? headers,
-  ) async {
+    int? expectedBytes, {
+    Duration? timeout,
+  }) async {
     if (!proxyClient.isConnected) {
       await proxyClient.connect();
     }
@@ -102,14 +174,18 @@ class ProxyFileTransport implements FileTransport {
       _attached = true;
     }
 
-    print('[TRANS] GET server=$serverId path=$path');
+    final effectiveTimeout = timeout ?? _requestTimeout(expectedBytes);
+    print('[TRANS] GET server=$serverId path=$path '
+        'expectedBytes=$expectedBytes timeout=${effectiveTimeout.inSeconds}s');
     final result = await proxyClient.sendRequest(
       serverId: serverId,
       method: 'GET',
       path: path,
       headers: _withAuth(headers),
-    ).timeout(const Duration(seconds: 30), onTimeout: () {
-      throw Exception('proxy request timed out after 30s');
+    ).timeout(effectiveTimeout, onTimeout: () {
+      throw Exception(
+          'proxy request timed out after ${effectiveTimeout.inSeconds}s '
+          '(large download at low throughput?)');
     });
     print('[TRANS] resp status=${result['status_code']} bodyType=${result['body']?.runtimeType} bodyLen=${result['body'] is String ? (result['body'] as String).length : (result['body'] is List<int> ? (result['body'] as List<int>).length : 'null')}');
     if (result['body'] is String && (result['body'] as String).isNotEmpty) {

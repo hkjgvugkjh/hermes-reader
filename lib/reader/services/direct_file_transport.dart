@@ -55,7 +55,8 @@ class DirectFileTransport implements FileTransport {
   }
 
   @override
-  Future<TransportResponse> get(String path, {Map<String, String>? headers}) async {
+  Future<TransportResponse> get(String path,
+      {Map<String, String>? headers, int? expectedBytes}) async {
     final uri = Uri.parse('${server.baseUrl}$path');
     final merged = <String, String>{
       'X-Hermes-Profile': server.profile,
@@ -67,6 +68,41 @@ class DirectFileTransport implements FileTransport {
       statusCode: resp.statusCode,
       body: Uint8List.fromList(resp.bodyBytes),
       headers: resp.headers,
+    );
+  }
+
+  /// The Studio API has no Range support, so ranges are emulated by fetching
+  /// the file once and slicing it. Progress therefore still works (the UI sees
+  /// per-chunk advances), but the whole body is transferred on the first call.
+  @override
+  bool get supportsRange => true;
+
+  @override
+  Future<TransportResponse> getRange(
+    String path, {
+    required int offset,
+    required int length,
+    Map<String, String>? headers,
+    int? expectedBytes,
+  }) async {
+    final uri = Uri.parse(path);
+    final basePath = Uri(
+      path: uri.path,
+      queryParameters: {'path': uri.queryParameters['path'] ?? ''},
+    ).toString();
+    final full = await get(basePath, headers: headers, expectedBytes: expectedBytes);
+    final total = full.body.length;
+    final start = offset.clamp(0, total);
+    var end = start + length;
+    if (end > total) end = total;
+    return TransportResponse(
+      statusCode: full.statusCode,
+      body: Uint8List.sublistView(full.body, start, end),
+      headers: {
+        ...full.headers,
+        'X-Hermes-Total': '$total',
+        'X-Hermes-Offset': '$start',
+      },
     );
   }
 

@@ -20,7 +20,7 @@ class LocalFileSystemTransport implements FileTransport {
 
   @override
   Future<TransportResponse> get(String path,
-      {Map<String, String>? headers}) async {
+      {Map<String, String>? headers, int? expectedBytes}) async {
     final uri = Uri.parse(path);
     if (uri.path.contains('/api/studio/files/list')) {
       return _list(uri.queryParameters['path'] ?? '');
@@ -63,6 +63,47 @@ class LocalFileSystemTransport implements FileTransport {
       return TransportResponse(statusCode: 404, body: Uint8List(0));
     }
     return TransportResponse(statusCode: 200, body: await file.readAsBytes());
+  }
+
+  /// The local filesystem can serve ranges directly, so downloads from the
+  /// device-local shelf also report progress.
+  @override
+  bool get supportsRange => true;
+
+  /// Serves a byte range of a local file. Reading only the requested window
+  /// keeps memory flat for large books.
+  @override
+  Future<TransportResponse> getRange(
+    String path, {
+    required int offset,
+    required int length,
+    Map<String, String>? headers,
+    int? expectedBytes,
+  }) async {
+    final uri = Uri.parse(path);
+    if (!uri.path.contains('/api/studio/files/read')) {
+      return TransportResponse(statusCode: 404, body: Uint8List(0));
+    }
+    final file = File(_join(rootDir.path, _localRel(uri.queryParameters['path'] ?? '')));
+    if (!await file.exists()) {
+      return TransportResponse(statusCode: 404, body: Uint8List(0));
+    }
+    final total = await file.length();
+    final start = offset.clamp(0, total);
+    var end = start + length;
+    if (end > total) end = total;
+    final raf = await file.open();
+    try {
+      await raf.setPosition(start);
+      final bytes = await raf.read(end - start);
+      return TransportResponse(
+        statusCode: 200,
+        body: Uint8List.fromList(bytes),
+        headers: {'X-Hermes-Total': '$total', 'X-Hermes-Offset': '$start'},
+      );
+    } finally {
+      await raf.close();
+    }
   }
 
   /// Strips the sandbox `library/` prefix so both the `list` request (`library`)
