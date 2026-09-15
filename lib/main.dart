@@ -21,7 +21,6 @@ import 'reader/services/builtin_tts_source.dart';
 import 'reader/screens/reader_home_screen.dart';
 import 'reader/screens/session_monitor_screen.dart';
 import 'reader/screens/task_list_screen.dart';
-import 'reader/screens/ebook_reader_screen.dart';
 import 'reader/models/book.dart';
 import 'reader/models/global_config.dart';
 import 'reader/services/direct_file_transport.dart';
@@ -66,6 +65,16 @@ class HermesReaderApp extends StatelessWidget {
         ),
         ChangeNotifierProvider(create: (_) => SessionProvider()),
         ChangeNotifierProvider(create: (_) => TaskProvider()),
+        ProxyProvider<TaskProvider, void>(
+          // Wire the TaskProvider into the SessionProvider so DI authorization
+          // requests (0x39) surfaced by the proxy become pending tasks.
+          update: (context, taskProvider, _) {
+            final session =
+                Provider.of<SessionProvider>(context, listen: false);
+            session.setTaskProvider(taskProvider);
+            return null;
+          },
+        ),
         ChangeNotifierProvider(create: (_) => GlobalConfigProvider()),
         ChangeNotifierProvider(create: (_) => ServerProvider()),
         ProxyProvider<SessionProvider, TtsService>(

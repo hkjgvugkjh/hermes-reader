@@ -87,14 +87,16 @@ class ProxyClient:
     def _encrypt(self, plaintext: str) -> bytes:
         aead = ChaCha20Poly1305(self.key)
         nonce = os.urandom(12)
-        # cryptography's ChaCha20Poly1305.encrypt returns ciphertext+tag
-        ct = aead.encrypt(plaintext.encode(), nonce)
+        # cryptography's ChaCha20Poly1305.encrypt returns ciphertext+tag.
+        # NOTE: older cryptography (<3.0) uses encrypt(nonce, data, ad);
+        # newer reverses it. This env ships the old order.
+        ct = aead.encrypt(nonce, plaintext.encode(), b"")
         return nonce + ct  # nonce(12) + ciphertext + tag(16)
 
     def _decrypt(self, blob: bytes) -> str:
         aead = ChaCha20Poly1305(self.key)
         nonce, ct = blob[:12], blob[12:]
-        return aead.decrypt(ct, nonce).decode()
+        return aead.decrypt(nonce, ct, b"").decode()
 
     # ---- framing ----
     def _send_frame(self, type_: int, payload: str):
@@ -198,25 +200,21 @@ class ProxyTunnel:
         self.cid = cid
         self.server_id = server_id
         self.path = path
+        self.on_frame = None  # set by caller for the chat-run state machine
         self._done = threading.Event()
 
     def on_data(self, text: str):
         # Engine.IO frame received from upstream.
         print(f"[ws<] {text!r}")
-        # Respond to ping immediately.
+        # Respond to Engine.IO ping immediately.
         if text == "2":
             self.client.send_tunnel(self.cid, "3")
             return
-        # Parse Socket.IO events (42<ns>,[name,data]) for visibility.
-        if text.startswith("42"):
-            rest = text[2:]
-            if rest.startswith("/"):
-                rest = rest.split(",", 1)[1] if "," in rest else ""
+        if self.on_frame is not None:
             try:
-                arr = json.loads(rest)
-                print(f"[event] {arr[0]} {json.dumps(arr[1]) if len(arr) > 1 else ''}")
-            except Exception:
-                pass
+                self.on_frame(text)
+            except Exception as e:  # never block the read loop
+                print(f"[frame err] {e}")
 
     def on_close(self):
         self._done.set()
@@ -247,28 +245,60 @@ def main():
     c.connect()
     print("[proxy] handshake ok")
 
-    headers = {}
-    if args.auth_token:
-        headers["Authorization"] = f"Bearer {args.auth_token}"
-    path = f"/socket.io/?EIO=4&transport=websocket&profile={args.profile}"
-    if args.auth_token:
-        from urllib.parse import quote
-        path += f"&token={quote(args.auth_token)}"
+    from urllib.parse import quote
+    ns = "/chat-run"
+    jwt = args.auth_token
 
-    tunnel = c.open_tunnel(args.server, path, headers)
+    # Engine.IO handshake query carries only EIO/transport/profile. The JWT is
+    # sent in the /chat-run namespace-connect packet body (backend reads it from
+    # handshake.auth), exactly like the reference chatsnoop tool. Critically, the
+    # namespace connect must wait for the Engine.IO OPEN ("0") frame first.
+    path = f"/socket.io/?EIO=4&transport=websocket&profile={quote(args.profile)}"
+    if jwt:
+        # Backend reads the JWT from handshake.auth, which for the raw
+        # websocket transport comes from the Engine.IO handshake query.
+        path += f"&token={quote(jwt)}"
+
+    tunnel = c.open_tunnel(args.server, path, None)
     print(f"[tunnel] open -> {path}")
 
-    ns = "/chat-run"
-    tunnel.send(f"40{ns}," + json.dumps({"token": args.auth_token}))
-    print("[io] connect namespace")
-    tunnel.send(f"42{ns}," + json.dumps(["resume", {"session_id": args.session_id, "profile": args.profile}]))
-    print("[io] resume")
-    tunnel.send(f"42{ns}," + json.dumps(["run", {
-        "session_id": args.session_id,
-        "input": args.input,
-        "profile": args.profile,
-    }]))
-    print(f"[io] run: {args.input!r}")
+    sent_run = {"v": False}
+
+    def handle(text: str):
+        if not text:
+            return
+        t = text[0]
+        if t == "0":
+            # Engine.IO OPEN -> connect the /chat-run namespace now.
+            tunnel.send(f"40{ns}," + json.dumps({"token": jwt}))
+            print(f"[io] connect namespace (token={len(jwt)} chars)")
+        elif t == "4" and len(text) > 1 and text[1] == "0":
+            # Namespace CONNECT ack -> subscribe + run (once).
+            if sent_run["v"]:
+                return
+            sent_run["v"] = True
+            tunnel.send(f"42{ns}," + json.dumps(["resume", {
+                "session_id": args.session_id, "profile": args.profile}]))
+            print("[io] resume")
+            tunnel.send(f"42{ns}," + json.dumps(["run", {
+                "session_id": args.session_id,
+                "input": args.input,
+                "profile": args.profile,
+            }]))
+            print(f"[io] run: {args.input!r}")
+        elif t == "4" and len(text) > 1 and text[1] == "4":
+            print(f"[io] CONNECT ERROR: {text}")
+        elif text.startswith("42"):
+            rest = text[2:]
+            if rest.startswith("/"):
+                rest = rest.split(",", 1)[1] if "," in rest else ""
+            try:
+                arr = json.loads(rest)
+                print(f"[event] {arr[0]} {json.dumps(arr[1]) if len(arr) > 1 else ''}")
+            except Exception:
+                pass
+
+    tunnel.on_frame = handle
 
     print("=== listening for events (Ctrl-C to stop early) ===")
     try:
