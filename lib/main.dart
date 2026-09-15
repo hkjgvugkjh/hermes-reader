@@ -28,6 +28,7 @@ import 'reader/services/direct_file_transport.dart';
 import 'reader/services/proxy_file_transport.dart';
 import 'reader/services/proxy_client.dart' as reader_proxy;
 import 'reader/widgets/session_detail_dialog.dart';
+import 'reader/widgets/robot_reading_animation.dart';
 import 'reader/screens/local_library_screen.dart';
 import 'reader/models/hive_models.dart';
 import 'reader/utils/error_messages.dart';
@@ -135,6 +136,20 @@ class StartupScreen extends StatefulWidget {
 class _StartupScreenState extends State<StartupScreen> {
   final List<_CheckItem> _checks = [];
   bool _allPassed = true;
+
+  /// Keep the splash (with the robot animation) visible for at least this long
+  /// so the animation is actually seen even when startup checks pass quickly.
+  static const _minSplashDuration = Duration(milliseconds: 2200);
+  final DateTime _startedAt = DateTime.now();
+
+  /// Sleeps until [_minSplashDuration] has elapsed since the splash appeared.
+  Future<void> _awaitMinSplash() async {
+    final elapsed = DateTime.now().difference(_startedAt);
+    final remaining = _minSplashDuration - elapsed;
+    if (remaining > Duration.zero) {
+      await Future<void>.delayed(remaining);
+    }
+  }
 
   @override
   void initState() {
@@ -284,26 +299,26 @@ class _StartupScreenState extends State<StartupScreen> {
 
   void _navigateToLocal() {
     if (!mounted) return;
-    Future.delayed(const Duration(seconds: 1), () {
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.local)),
-        );
-      }
-    });
+    () async {
+      await _awaitMinSplash();
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.local)),
+      );
+    }();
   }
 
   void _navigateToOnline() {
     if (!mounted) return;
-    Future.delayed(const Duration(seconds: 1), () {
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.online)),
-        );
-      }
-    });
+    () async {
+      await _awaitMinSplash();
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen(mode: AppMode.online)),
+      );
+    }();
   }
 
   @override
@@ -315,10 +330,17 @@ class _StartupScreenState extends State<StartupScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              CircularProgressIndicator(
-                value: _checks.isEmpty ? null : _checks.where((c) => c.done).length / _checks.length,
+              const RobotReadingAnimation(size: 150),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: 32,
+                height: 32,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3,
+                  value: _checks.isEmpty ? null : _checks.where((c) => c.done).length / _checks.length,
+                ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
               Text(
                 _allPassed ? '正在启动...' : '启动完成（有警告）',
                 style: Theme.of(context).textTheme.titleMedium,

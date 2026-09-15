@@ -205,6 +205,12 @@ flutter run -d <device-id>       # 或一步到位
 
 - 底部菜单正中间新增「本地文库」入口。
 - 本地文库页支持**右划返回**上一级界面（水平右滑手势触发 `Navigator.maybePop`）。
+- 新增应用图标：小机器人翻书（紫色圆角背景 + 机器人 + 翻起的书页），
+  已替换 `android/app/src/main/res/mipmap-*/ic_launcher.png`，并保留一份
+  512px 参考图 `assets/icon/ic_launcher_512.png`。
+- 启动界面新增**机器人翻书动画**：小机器人把书页从右向左翻，循环播放
+  （`CustomPainter` 绘制，无需图片资源）；原生启动背景改为品牌紫，避免冷启动闪白；
+  启动页最少展示 2.2 秒，确保动画可见。
 
 **健壮性**
 
