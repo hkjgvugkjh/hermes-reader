@@ -15,9 +15,14 @@ class ProxyFileTransport implements FileTransport {
     this.username,
     this.password,
     this.profile = 'default',
+    this.fallbackToken,
   });
 
   final ProxyClient proxyClient;
+
+  /// Used as `Authorization: Bearer <token>` when the proxy has no backend JWT
+  /// cached for this server (mirrors SessionProvider / SessionDetailDialog).
+  final String? fallbackToken;
 
   /// The proxy's own id for the target server, e.g. 'local'.
   ///
@@ -53,6 +58,22 @@ class ProxyFileTransport implements FileTransport {
     }
   }
 
+  /// Adds `Authorization: Bearer <backend_jwt>` unless the caller already set
+  /// one. The Studio file API rejects unauthenticated requests with 401; the
+  /// proxy issues the backend JWT during connectServer (mcu-login).
+  Map<String, String> _withAuth(Map<String, String>? headers) {
+    final out = <String, String>{...?headers};
+    if (out.keys.any((k) => k.toLowerCase() == 'authorization')) {
+      return out;
+    }
+    final jwt = proxyClient.backendJWT(serverId);
+    final token = (jwt != null && jwt.isNotEmpty) ? jwt : fallbackToken;
+    if (token != null && token.isNotEmpty) {
+      out['Authorization'] = 'Bearer $token';
+    }
+    return out;
+  }
+
   bool _looksLikeConnectionFailure(Object error) {
     final text = error.toString();
     return text.contains('WebSocket connection failed') ||
@@ -86,7 +107,7 @@ class ProxyFileTransport implements FileTransport {
       serverId: serverId,
       method: 'GET',
       path: path,
-      headers: headers,
+      headers: _withAuth(headers),
     ).timeout(const Duration(seconds: 30), onTimeout: () {
       throw Exception('proxy request timed out after 30s');
     });
