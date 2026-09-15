@@ -373,6 +373,22 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Swipe right anywhere on the page to go back to the previous screen.
+    // The list itself only scrolls vertically, so a horizontal drag is
+    // unambiguous.
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragEnd: (details) {
+        final vx = details.primaryVelocity ?? 0;
+        if (vx > 250) {
+          Navigator.maybePop(context);
+        }
+      },
+      child: _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('本地文库'),

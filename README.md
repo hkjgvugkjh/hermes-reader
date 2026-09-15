@@ -176,6 +176,11 @@ flutter run -d <device-id>       # 或一步到位
   底部输入框可续聊并自动刷新。
 - 修复读取会话快照 `HTTP 401 未授权`：请求未携带 `Authorization`。现优先使用
   代理下发的后端 JWT（`ProxyClient.backendJWT`），缺失时回退到服务器 `authToken`。
+- 修复运行中的会话被显示为 `stopped`：状态改为按 studio 的 `ended_at`/`end_reason`
+  判定（`ended_at` 为 null 即运行中），无明确状态字段时默认 running，不再仅凭
+  `last_active` 时效武断判 stopped。
+- 修复代理下发后端 JWT：`DIConnectAckPayload` 增加 `token` 字段，代理在
+  ConnectAck（0x31）中回传 mcu-login 所得 JWT，客户端才能调用 Studio REST API。
 
 **语音朗读**
 
@@ -188,9 +193,18 @@ flutter run -d <device-id>       # 或一步到位
 - 修复退出阅读页后仍在朗读的问题（`dispose` 前清除朗读状态）。
 - 推理线程数 `1 → 4`，提升合成速度。
 
+**书架与文件库**
+
+- 修复点击书架 `401 Unauthorized`：`ProxyFileTransport` 现在为文件 API 请求
+  注入 `Authorization: Bearer <后端 JWT>`，缺失时回退服务器 `authToken`。
+- 修复书架列表 `Not Found`：代理转发时未正确拆分 URL 的 query，
+  `/api/studio/files/list?path=library` 的 `?` 被转义进路径导致上游 404；
+  改为 `url.Parse` 后再拼接，书架恢复为 200 并正确列出文件。
+
 **界面**
 
 - 底部菜单正中间新增「本地文库」入口。
+- 本地文库页支持**右划返回**上一级界面（水平右滑手势触发 `Navigator.maybePop`）。
 
 **健壮性**
 
