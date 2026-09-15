@@ -43,5 +43,16 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/build/
+
+# TTS model assets (large binary, not committed)
+/assets/tts/espeak-ng-data.zip
+/assets/tts/model.onnx
+/assets/tts/model.onnx.json
+/assets/tts/tokens.txt
+
+# Generated / helper scripts (not committed)
+/scripts/gen_robot_icon.py
+/scripts/verify_proxy_token.py
 
 PROGRESS.md
