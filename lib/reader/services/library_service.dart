@@ -7,6 +7,7 @@ import 'external_library_dir.dart';
 import 'library_cache_index.dart';
 
 import '../models/book.dart';
+import '../utils/error_messages.dart';
 import 'book_text_extractor.dart';
 import 'pdf_image_decoder.dart';
 import 'file_body_decoder.dart';
@@ -18,9 +19,33 @@ import 'library_sandbox.dart';
 /// transport-agnostic and testable without a network.
 abstract class FileTransport {
   /// Performs a GET and returns the raw body bytes plus the status code.
+  ///
+  /// [expectedBytes] is the file's declared size (if known). Transports that
+  /// apply a request timeout scale it from this so that large files downloading
+  /// at a healthy rate (>= ~10 KB/s) are never reported as timed out.
   Future<TransportResponse> get(
     String path, {
     Map<String, String>? headers,
+    int? expectedBytes,
+  });
+
+  /// Whether this transport can serve a byte range of a file via [getRange].
+  ///
+  /// When false, callers fall back to a single whole-file [get] and cannot
+  /// report incremental progress.
+  bool get supportsRange => false;
+
+  /// Fetches up to [length] bytes of [path] starting at [offset].
+  ///
+  /// The response headers carry `X-Hermes-Total` (full file size) and
+  /// `X-Hermes-Offset` so the caller can compute download progress without
+  /// guessing. Only called when [supportsRange] is true.
+  Future<TransportResponse> getRange(
+    String path, {
+    required int offset,
+    required int length,
+    Map<String, String>? headers,
+    int? expectedBytes,
   });
 }
 
@@ -36,6 +61,47 @@ class TransportResponse {
   });
 
   bool get isOk => statusCode >= 200 && statusCode < 300;
+}
+
+/// A snapshot of an in-flight download, surfaced to the UI so it can show
+/// "downloaded x of y" plus a live transfer rate.
+class DownloadProgress {
+  const DownloadProgress({
+    required this.received,
+    required this.total,
+    required this.rateBps,
+  });
+
+  /// Bytes received so far.
+  final int received;
+
+  /// Total bytes expected (0 when the server did not declare a size).
+  final int total;
+
+  /// Smoothed transfer rate in bytes per second (0 when not yet measurable).
+  final double rateBps;
+
+  /// Fraction downloaded, 0.0 - 1.0. Returns 0 while the total is unknown.
+  double get fraction => total > 0 ? (received / total).clamp(0.0, 1.0) : 0.0;
+
+  /// Human-readable "1.2 MB / 5.0 MB" style label.
+  String get sizeLabel {
+    final r = _fmtBytes(received);
+    return total > 0 ? '$r / ${_fmtBytes(total)}' : r;
+  }
+
+  /// Human-readable rate label, e.g. "320 KB/s".
+  String get rateLabel =>
+      rateBps <= 0 ? '—' : '${_fmtBytes(rateBps.round())}/s';
+
+  static String _fmtBytes(int b) {
+    if (b < 1024) return '$b B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} KB';
+    if (b < 1024 * 1024 * 1024) {
+      return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
 }
 
 /// Request handed to the background isolate. Every field is sendable so the
@@ -184,7 +250,23 @@ class LibraryService {
     return books;
   }
 
+  /// Progress snapshot emitted while [downloadBook] streams a file.
+  ///
+  /// [received] / [total] are byte counts (total may be 0 when the server does
+  /// not declare a size); [rateBps] is a smoothed bytes-per-second estimate.
+  DownloadProgress _progress(int received, int total, double rateBps) =>
+      DownloadProgress(received: received, total: total, rateBps: rateBps);
+
+  /// Byte size of each chunk pulled in a chunked download. Small enough that a
+  /// single request can never stall long enough to look like a timeout, and
+  /// large enough to keep per-request overhead negligible.
+  static const int _chunkSize = 1 << 20; // 1 MiB
+
   /// Downloads a book and stores it in the app's private directory.
+  ///
+  /// When [transport] supports ranges the file is pulled in chunks and
+  /// [onProgress] is invoked after each chunk with the running byte count and a
+  /// live rate, so the UI can show progress instead of freezing at 0%.
   ///
   /// Returns the decoded [BookContent]. Throws [LibrarySandboxError] if the
   /// path or the payload violates any limit.
@@ -192,6 +274,7 @@ class LibraryService {
     required FileTransport transport,
     required Book book,
     String? encoding,
+    void Function(DownloadProgress)? onProgress,
   }) async {
     // Re-validate even for a Book that came from our own listing — the object
     // may have been persisted and tampered with.
@@ -199,7 +282,11 @@ class LibraryService {
     sandbox.checkTransfer(book.sizeBytes);
 
     final type = _typeOf(book);
-    final bytes = await _fetchBytes(transport, safePath, type);
+    final bytes = transport.supportsRange
+        ? await _fetchChunked(transport, safePath, type,
+            expectedBytes: book.sizeBytes, onProgress: onProgress)
+        : await _fetchBytes(transport, safePath, type,
+            expectedBytes: book.sizeBytes);
     final validated = sandbox.validateContent(
       bytes,
       declaredSize: book.sizeBytes,
@@ -320,9 +407,11 @@ class LibraryService {
   Future<Uint8List> _fetchBytes(
     FileTransport transport,
     String safePath,
-    FileType type,
-  ) async {
-    final response = await transport.get(_readPath(safePath));
+    FileType type, {
+    int? expectedBytes,
+  }) async {
+    final response = await transport.get(_readPath(safePath),
+        expectedBytes: expectedBytes);
     if (!response.isOk) {
       throw LibrarySandboxError(
           'download failed with status ${response.statusCode}');
@@ -333,7 +422,8 @@ class LibraryService {
       return payload;
     }
 
-    final retry = await transport.get(_readPath(safePath, encoding: 'base64'));
+    final retry = await transport.get(_readPath(safePath, encoding: 'base64'),
+        expectedBytes: expectedBytes);
     if (!retry.isOk) return payload;
     return _decodeBase64Body(retry.body, type) ?? payload;
   }
@@ -345,6 +435,103 @@ class LibraryService {
       path: '/api/studio/files/read',
       queryParameters: query,
     ).toString();
+  }
+
+  /// Pulls a file in fixed-size chunks, reporting progress after each one.
+  ///
+  /// The total size comes from the first response's `X-Hermes-Total` header
+  /// (falling back to [expectedBytes]) so the progress bar is accurate even
+  /// when the caller did not know the size up front. The rate is measured over
+  /// a sliding window to avoid a jittery display.
+  Future<Uint8List> _fetchChunked(
+    FileTransport transport,
+    String safePath,
+    FileType type, {
+    int? expectedBytes,
+    void Function(DownloadProgress)? onProgress,
+  }) async {
+    final builder = BytesBuilder(copy: false);
+    var offset = 0;
+    var total = expectedBytes ?? 0;
+    final sw = Stopwatch()..start();
+    // Sliding-window rate：keeps the last few chunk timings so transient
+    // stalls do not spike the reported speed.
+    final recent = <int>[]; // bytes of the last N chunks
+    final recentMs = <int>[];
+
+    while (true) {
+      final TransportResponse resp;
+      try {
+        resp = await transport.getRange(
+          safePath,
+          offset: offset,
+          length: _chunkSize,
+          expectedBytes: total > 0 ? total : null,
+        );
+      } catch (e) {
+        // Report how far the download got before it broke, so a long stall is
+        // diagnosable ("已下载 3.2 MB / 12 MB 后超时") rather than a bare timeout.
+        final done = DownloadProgress(received: offset, total: total, rateBps: 0);
+        final friendly = describeError(e);
+        throw LibrarySandboxError(
+            '${friendly.message}（已下载 ${done.sizeLabel}，中断于第 ${offset ~/ _chunkSize + 1} 块）');
+      }
+      if (!resp.isOk) {
+        // A partial download is useless; surface the failure clearly.
+        throw LibrarySandboxError(
+            'download failed at offset $offset with status ${resp.statusCode}');
+      }
+      final headerTotal = int.tryParse(resp.headers['x-hermes-total'] ?? '');
+      if (headerTotal != null && headerTotal > 0) total = headerTotal;
+      final chunk = resp.body;
+      // An empty chunk with bytes still outstanding would loop forever; treat
+      // it as end-of-stream so a server quirk cannot hang the download.
+      if (chunk.isEmpty) break;
+
+      builder.add(chunk);
+      offset += chunk.length;
+
+      // Update the sliding window (drop timings older than ~3s of history).
+      recent.add(chunk.length);
+      recentMs.add(sw.elapsedMilliseconds);
+      while (recentMs.length > 8) {
+        recent.removeAt(0);
+        recentMs.removeAt(0);
+      }
+      final windowBytes = recent.fold<int>(0, (a, b) => a + b);
+      final windowMs = recentMs.length >= 2
+          ? recentMs.last - recentMs.first
+          : sw.elapsedMilliseconds;
+      final rate =
+          windowMs > 0 ? windowBytes * 1000 / windowMs : 0.0;
+
+      onProgress?.call(_progress(offset, total, rate));
+      print('[DL] $safePath offset=$offset total=$total '
+          'rate=${rate.toStringAsFixed(0)}B/s');
+
+      // Stop once we have the whole file. When the total is known we trust it
+      // (a short response just means the server sliced smaller than asked);
+      // otherwise a short chunk marks the tail.
+      if (total > 0) {
+        if (offset >= total) break;
+      } else if (chunk.length < _chunkSize) {
+        break;
+      }
+    }
+
+    final raw = builder.takeBytes();
+    // Reuse the single-shot unwrapping so the base64/JSON envelope handling
+    // stays in one place.
+    final payload = _bodyDecoder.decode(raw, type: type);
+    if (!_fileTypeDetector.needsExtraction(type) || !_isDamaged(payload)) {
+      onProgress?.call(_progress(offset, total > 0 ? total : offset, 0));
+      return payload;
+    }
+    // Damaged binary payload: fall back to a single base64 read.
+    final retry = await transport.get(_readPath(safePath, encoding: 'base64'),
+        expectedBytes: expectedBytes);
+    if (!retry.isOk) return payload;
+    return _decodeBase64Body(retry.body, type) ?? payload;
   }
 
   /// True when the payload is text that carries UTF-8 replacement characters,

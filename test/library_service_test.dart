@@ -18,7 +18,22 @@ class _FakeTransport implements FileTransport {
 
   @override
   Future<TransportResponse> get(String path,
-      {Map<String, String>? headers}) async {
+      {Map<String, String>? headers, int? expectedBytes}) async {
+    paths.add(path);
+    return _respond(path, _call++);
+  }
+
+  // The fakes exercise the single-shot path; range support is off so
+  // downloadBook falls back to a whole-file get.
+  @override
+  bool get supportsRange => false;
+
+  @override
+  Future<TransportResponse> getRange(String path,
+      {required int offset,
+      required int length,
+      Map<String, String>? headers,
+      int? expectedBytes}) async {
     paths.add(path);
     return _respond(path, _call++);
   }
@@ -71,6 +86,51 @@ const _pdfSource =
 Book _pdfBook() =>
     _book('a.pdf', FileType.pdf, utf8.encode(_pdfSource).length);
 
+/// A range-capable transport backed by an in-memory file. Serves byte ranges
+/// (mirroring what the proxy does) so the chunked download path is exercised.
+///
+/// It caps every response at [chunkSize] bytes regardless of the requested
+/// length, which simulates a server that streams a large file in small pieces
+/// and forces the service through several range requests.
+class _RangeTransport implements FileTransport {
+  _RangeTransport(this.file, {this.chunkSize = 8});
+
+  final Uint8List file;
+  final int chunkSize;
+  final List<int> requestedOffsets = [];
+
+  @override
+  Future<TransportResponse> get(String path,
+          {Map<String, String>? headers, int? expectedBytes}) async =>
+      TransportResponse(
+        statusCode: 200,
+        body: Uint8List.fromList(file),
+        headers: {'X-Hermes-Total': '${file.length}'},
+      );
+
+  @override
+  bool get supportsRange => true;
+
+  @override
+  Future<TransportResponse> getRange(String path,
+      {required int offset,
+      required int length,
+      Map<String, String>? headers,
+      int? expectedBytes}) async {
+    requestedOffsets.add(offset);
+    final want = length < chunkSize ? length : chunkSize;
+    final end = (offset + want) > file.length ? file.length : offset + want;
+    return TransportResponse(
+      statusCode: 200,
+      body: Uint8List.sublistView(file, offset, end),
+      headers: {
+        'X-Hermes-Total': '${file.length}',
+        'X-Hermes-Offset': '$offset',
+      },
+    );
+  }
+}
+
 void main() {
   late _FakeStorage storage;
 
@@ -78,6 +138,34 @@ void main() {
 
   LibraryService _service({LibrarySandbox? sandbox}) =>
       LibraryService(storage: storage, sandbox: sandbox ?? const _RelaxedSandbox());
+
+  test('a range-capable transport downloads in chunks and reports progress',
+      () async {
+    // 32 bytes served in 8-byte chunks via a transport that ignores the
+    // requested chunk size (so 4 progress updates are expected).
+    final payload = _body('ABCDEFGHIJKLMNOPQRSTUVWXYZ012345');
+    final transport = _RangeTransport(payload);
+    final service = _service();
+
+    final updates = <DownloadProgress>[];
+    final content = await service.downloadBook(
+      transport: transport,
+      book: _book('a.txt', FileType.plainText, payload.length),
+      onProgress: updates.add,
+    );
+
+    // The whole file was assembled byte-for-byte.
+    expect(content.text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345');
+    // Progress was reported (one update per chunk, at least two).
+    expect(updates.length, greaterThanOrEqualTo(2));
+    // The final update reflects the complete transfer.
+    expect(updates.last.received, payload.length);
+    expect(updates.last.total, payload.length);
+    expect(updates.last.fraction, 1.0);
+    // Chunks were requested sequentially from offset 0.
+    expect(transport.requestedOffsets.first, 0);
+    expect(transport.requestedOffsets, orderedEquals(List.generate(4, (i) => i * 8)));
+  });
 
   test('text files are unwrapped from the JSON envelope', () async {
     final transport = _FakeTransport((_, __) => _ok(_envelope('第一章 正文')));

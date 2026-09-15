@@ -169,6 +169,9 @@ class LocalLibraryProvider extends ChangeNotifier {
   bool isDownloading(String id) => shelf.isDownloading(id);
   double progressFor(String id) => shelf.progressFor(id);
 
+  /// Live download stats (received/total bytes + rate) for the card UI.
+  DownloadProgress? downloadStatsFor(String id) => shelf.downloadStatsFor(id);
+
   @override
   void dispose() {
     shelf.dispose();

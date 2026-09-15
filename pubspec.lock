@@ -264,9 +264,11 @@ packages:
   hermes_shared:
     dependency: "direct main"
     description:
-      path: "../hermes-shared"
-      relative: true
-    source: path
+      path: "."
+      ref: main
+      resolved-ref: "9f54cfbf0e149c81d65bc84f104b25d2a615b82f"
+      url: "https://github.com/hkjgvugkjh/hermes-shared.git"
+    source: git
     version: "1.0.0"
   hooks:
     dependency: transitive
