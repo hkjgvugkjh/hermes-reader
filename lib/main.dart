@@ -1033,6 +1033,7 @@ class _HomeScreenState extends State<HomeScreen> {
             username: server.username,
             password: server.password,
             profile: server.profile,
+            fallbackToken: server.authToken,
           )
         : DirectFileTransport(server: server);
     
