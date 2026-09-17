@@ -55,4 +55,4 @@ app.*.map.json
 /scripts/gen_robot_icon.py
 /scripts/verify_proxy_token.py
 
-PROGRESS.md
+PROGRESS.mdPLAN.md
