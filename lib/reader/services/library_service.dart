@@ -472,7 +472,7 @@ class LibraryService {
       final TransportResponse resp;
       try {
         resp = await transport.getRange(
-          safePath,
+          _readPath(safePath),
           offset: offset,
           length: _chunkSize,
           expectedBytes: total > 0 ? total : null,
