@@ -601,6 +601,10 @@ class ReaderProvider extends ChangeNotifier {
         }
         // Center area (0.1-0.9) toggles controls
         break;
+      case TapZoneMode.whole:
+        // Any tap advances; controls toggle via the footer buttons.
+        nextPage();
+        break;
     }
   }
 
@@ -613,6 +617,8 @@ class ReaderProvider extends ChangeNotifier {
         return false; // halves mode: always navigate
       case TapZoneMode.edges:
         return fraction >= 0.1 && fraction <= 0.9;
+      case TapZoneMode.whole:
+        return false; // whole mode: tap always navigates
     }
   }
 

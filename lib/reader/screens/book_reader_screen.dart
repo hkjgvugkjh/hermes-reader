@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/book.dart';
@@ -56,6 +57,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// sync channels when the user actually changes the setting.
   CommentSyncMode? _appliedCommentSyncMode;
 
+  /// Bridge to the native layer that forwards hardware volume-key presses so
+  /// they can be used for page navigation while this screen is active.
+  static const MethodChannel _volumeChannel =
+      MethodChannel('hermes/volume');
+  bool _volumeHandlerRegistered = false;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -89,6 +96,34 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       }
     }
     _loadEncodingLabel();
+    _registerVolumeKeys();
+  }
+
+  /// Forward hardware volume keys as page navigation. Only active while this
+  /// screen is mounted, so other screens keep normal volume behaviour.
+  void _registerVolumeKeys() {
+    if (_volumeHandlerRegistered) return;
+    _volumeHandlerRegistered = true;
+    _volumeChannel.setMethodCallHandler((call) async {
+      if (call.method == 'volumeKey') {
+        final direction = call.arguments as String?;
+        final reader = context.read<ReaderProvider>();
+        if (direction == 'up') {
+          reader.nextPage();
+        } else if (direction == 'down') {
+          reader.previousPage();
+        }
+      }
+      return null;
+    });
+    _volumeChannel.invokeMethod<void>('setEnabled', {'enabled': true});
+  }
+
+  void _unregisterVolumeKeys() {
+    if (!_volumeHandlerRegistered) return;
+    _volumeHandlerRegistered = false;
+    _volumeChannel.invokeMethod<void>('setEnabled', {'enabled': false});
+    _volumeChannel.setMethodCallHandler(null);
   }
 
   /// Reflects the encoding persisted for the open book in the cache index.
@@ -154,6 +189,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     _narrating = false;
     _tts?.setProgressHandler(null);
     _tts?.stop();
+    _unregisterVolumeKeys();
     context.read<ReaderProvider>().savePosition();
     super.dispose();
   }

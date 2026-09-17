@@ -445,13 +445,28 @@ class SessionProvider extends ChangeNotifier {
     }
   }
 
-  void _onChange(SessionChange change) {
+void _onChange(SessionChange change) {
+  // 检查是否是停止事件，只保留最新的一个停止会话
+  if (change.kind == SessionChangeKind.sessionStopped) {
+    // 检查是否已经记录过这个会话的停止
+    bool isDuplicate = _recentChanges.any((c) => 
+      c.kind == SessionChangeKind.sessionStopped && 
+      c.after?.id == change.after?.id
+    );
+    if (!isDuplicate) {
+      _recentChanges.insert(0, change);
+      if (_recentChanges.length > maxHistory) {
+        _recentChanges.removeLast();
+      }
+    }
+  } else {
     _recentChanges.insert(0, change);
     if (_recentChanges.length > maxHistory) {
       _recentChanges.removeLast();
     }
-    notifyListeners();
   }
+  notifyListeners();
+}
 
   /// Add a server and start monitoring if not already.
   Future<void> addServer(MonitorTarget target) async {

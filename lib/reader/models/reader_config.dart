@@ -5,7 +5,9 @@ enum TapZoneMode {
   /// Left half = back, right half = forward.
   halves('左右两区'),
   /// Only edges respond; center toggles controls.
-  edges('仅边缘区域');
+  edges('仅边缘区域'),
+  /// Tapping anywhere advances to the next page (controls toggle via footer).
+  whole('整屏单击翻页');
 
   const TapZoneMode(this.label);
   final String label;
@@ -108,7 +110,7 @@ class ReaderConfig {
     this.fontScale = 1.0,
     this.lineHeightFactor = 1.6,
     this.autoTurnPage = true,
-    this.tapZoneMode = TapZoneMode.thirds,
+    this.tapZoneMode = TapZoneMode.whole,
     this.leftZoneForward = false,
     this.commentSyncMode = CommentSyncMode.server,
   }) : assert(charsPerPage > 0, 'charsPerPage must be positive');

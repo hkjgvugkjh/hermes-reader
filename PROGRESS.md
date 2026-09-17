@@ -1,0 +1,234 @@
+# 进展记录
+
+**日期**: 2026-09-11
+**对照文档**: `PLAN.md`
+
+---
+
+## 总览
+
+| # | 规划项 | 状态 |
+|---|--------|------|
+| 1 | TTS 停止异常修复 | ✅ 完成 |
+| 2 | 扩展文件格式支持 | ✅ 完成 |
+| 3 | PDF 朗读支持 | ✅ 完成 |
+| 4 | EPUB 朗读支持 | ✅ 完成 |
+| 5 | 阅读位置记忆 | ✅ 完成（含书架 UI） |
+| 6 | 三区分页配置 | ✅ 完成（含设置入口） |
+| 7 | 朗读进度记录 | ✅ 完成 |
+| 8 | 文件类型限制（语音朗读） | ✅ 完成 |
+
+全部 8 项已实现，功能说明已并入 `README.md`。
+
+---
+
+## 本轮新增实现
+
+### 格式解析（原 2b / 3 / 4）
+
+新增 `BookTextExtractor` 抽象与 `DefaultBookTextExtractor`，按 `FileType` 分流：
+
+- `file_type_detector.dart` 已有判定逻辑，此处只需消费
+- `pdf_text_extractor.dart` — 纯 Dart 实现
+- `epub_text_extractor.dart` — 通过 `archive` 解 zip，走 `META-INF/container.xml` → OPF
+  → manifest → spine → 章节 XHTML，去标签后按章节记录分页点
+- HTML / MOBI 去标签 + 实体解码；JSON 重新缩进；纯文本原样透传
+
+`LibraryService.downloadBook()` 与 `readCached()` 改为调用提取器，并把
+`ExtractedText.breaks` 写进 `BookContent.pageBreaks`。Book 缺 `fileType` 时
+（旧数据）回退到按扩展名重新检测。
+
+`PaginatorService.paginate()` 新增 `breakOffsets`：PDF 一页 = 一个阅读页、
+EPUB 一章 = 一个阅读页，超长块再按句切分；无 breaks 时沿用原有的按字数流式分页。
+
+### 阅读位置记忆（原 5b）
+
+- `ReaderProvider` 新增 `loadProgress(bookId)`
+- 书架 `_BookTile` 显示"已读 N%"，有进度的书多出"从头开始"按钮
+- 退出阅读页回到书架时重新拉取进度
+- 空书架提示文案同步为完整的 7 种格式
+
+### 三区配置入口（原 6b）
+
+- 阅读页 AppBar 新增"阅读设置"：分区模式（三档单选）、左侧区域方向、
+  朗读自动翻页、每页字数滑块
+- 新增 `ReaderConfigStorage`，`ReaderProvider.updateConfig()` 落盘，
+  启动时由 `StartupScreen` 恢复
+
+### 朗读进度记录（原 7）
+
+- 新增 `NarrationProgress` 模型（bookId / pageIndex / charOffset / updatedAt）
+  与 `NarrationProgressService`
+- `SpeechSource` 增加可选 `setProgressHandler`，`LocalTtsSource` 转发
+  flutter_tts 的逐字进度，`TtsService` 记录最近偏移
+- 开始朗读时若有存档则跳到该页并从 `charOffset` 处续读；停止、异常、
+  离开页面都会保存；整本读完则清除
+- 与阅读进度完全独立存储，互不影响
+
+### 朗读类型限制（原 8）
+
+- 阅读页按 `book.fileType` 调 `isNarratable()`，不支持时朗读按钮置灰、
+  tooltip 说明原因，点击给出 Snackbar 提示
+
+---
+
+## 依赖变更
+
+- 新增 `archive: ^4.0.9` — EPUB 是 zip 容器，需要解压
+- 移除 `pdfrx` — 先加后删，见下
+- `pdf: ^3.10.4` 保留在 pubspec 但未使用：dart_pdf 只提供 `PdfDocumentParserBase`
+  （用于合并文档），没有文本提取 API
+
+### 为什么放弃 pdfrx
+
+`pdfrx` 基于 PDFium，构建时通过 `pdfium_dart` 的 hook 从 GitHub 下载约 10 MB 的
+原生二进制。本机访问 `github.com/bblanchon/pdfium-binaries` 超时，
+`flutter test` 与 `flutter build` 均直接失败：
+
+```
+ClientException: Connection timed out,
+uri=https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7811/pdfium-linux-x64.tgz
+Building native assets failed.
+```
+
+这与"快速构建"的目标冲突，故改为内置纯 Dart 提取器。
+
+### 为什么不用 epub 包
+
+`epub: ^3.2.0` 仍停留在 Dart 2（`sdk: '>=1.13.2 <3.0.0'`），不支持空安全，
+`flutter pub add` 直接失败。改用 `archive` 自行解析 OPF。
+
+---
+
+## 测试
+
+`flutter test` — **68 项全部通过**：
+
+| 文件 | 覆盖 |
+|------|------|
+| `file_type_detector_test.dart` | 扩展名识别、可朗读 / 可读 / 需提取判定 |
+| `book_text_extractor_test.dart` | 纯文本、HTML 去标签与实体、MOBI、JSON 与畸形 JSON、EPUB 章节顺序与分页点、损坏 EPUB 兜底、空白归一 |
+| `pdf_text_extractor_test.dart` | 未压缩流、FlateDecode 解压、TJ 数组拼接、UTF-16BE 十六进制串、转义还原、分页点、无文本与垃圾输入的兜底 |
+| `paginator_test.dart` | 按字数分页、breakOffsets 优先生效、超长块再切、越界与逆序断点过滤、空块不产生空页、进度换算、Markdown 转朗读文本 |
+| `reader_provider_test.dart` | 三区 / 两区 / 边缘的翻页与切换、方向反转、边界钳制、阅读位置恢复与越界回退、朗读进度读写与清除、两类进度互不干扰 |
+
+EPUB 测试用 `ZipEncoder` 在内存中构造 EPUB，PDF 测试直接拼内容流，都不依赖
+真实文件与平台通道；进度相关测试用 `SharedPreferences.setMockInitialValues`。
+
+---
+
+## 构建与验证
+
+- `flutter analyze` — **0 error**（余下为既有 warning/info）
+- `flutter build apk --debug` — 成功，114 秒
+- `adb install -r app-debug.apk` — Success
+- `adb shell am start com.hermes.reader/.MainActivity` — 进程存活，logcat 无 FATAL
+
+环境参数：
+
+```bash
+export PATH=/home/tomac/flutter/bin:/home/tomac/android-dev/sdk/platform-tools:$PATH
+export ANDROID_HOME=/home/tomac/android-dev/sdk
+export JAVA_HOME=/home/tomac/android-dev/jdk/jdk-17.0.11+9
+```
+
+设备：`PCT AL10`（Android 10, android-arm64），已通过 USB 连接。
+
+---
+
+## 缺陷修复：PDF 下载失败（size mismatch）
+
+**现象**：下载 `TG7221B_Datasheet_V1.0.pdf` 报
+`size mismatch: declared 1210136 but received 3070633`。
+
+**根因**：`/api/studio/files/read` 返回的是 JSON 信封 `{"content": "..."}`，
+content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放进 JSON，
+所有 >= 0x80 的字节都变成 U+FFFD。设备日志可证：
+
+```
+[TRANS] resp status=200 bodyType=String bodyLen=4094180
+[TRANS] body preview: eyJjb250ZW50IjoiJVBERi0xLjdcbiXCs++/ve+/vVxyXG4x...
+                     └─ {"content":"%PDF-1.7\n%<U+FFFD><U+FFFD>...
+```
+
+4094180 是 base64 长度，解码得 3070635 字节 JSON —— 与报错的 3070633 吻合。
+约 77% 的字节被替换为 U+FFFD（每个 3 字节），故体积膨胀到 2.54 倍。
+
+两个后果：一是触发 `validateContent` 里 `declaredSize * 2 + 1024` 的误判；
+二是**字节已不可逆丢失**，即便放宽检查，PDF 也是损坏的。
+
+**修复**：
+
+1. 新增 `FileBodyDecoder` — 下载后先剥掉 JSON 信封取 `content`，再交给后续处理。
+   严格 `utf8.decode` 失败即判定为真二进制，原样透传。
+   `.json` 类型跳过此步，避免把用户文件自身的 `content` 键误当信封。
+   `readCached` 同样处理，兼容旧版本写入的带信封缓存。
+2. `validateContent` 改为编码感知：
+   - 上限 4x + 64KB（吸收 JSON 信封与 UTF-8 膨胀），硬上限用 `maxTransferBytes`
+   - 下限仅在不足声明值 1/4 时报 `truncated`，这才是真正值得失败的截断
+   - 声明大小超过 `maxFileBytes` 单独拒绝
+   原先 `declaredSize * 2 + 1024` 对任何有编码开销的传输都会误伤。
+3. **二进制回退**：检测到 U+FFFD 污染且文件类型需提取（PDF/EPUB/MOBI）时，
+   带 `encoding=base64` 重试一次。服务端若支持就拿到完整字节（已缓存为干净副本），
+   不支持则沿用首次结果，不额外报错。
+
+**未解决**：服务端不配合时，二进制仍会损坏 —— 这是接口设计问题，客户端无法还原。
+彻底修复需要服务端增加二进制安全端点（返回原始字节或 base64），见"下一步建议"。
+
+---
+
+## 缺陷修复：书架列表超时
+
+**现象**：打开书架（服务器模式）卡住并提示超时，无法加载服务器 / 会话列表。
+
+**根因**：WebSocket 握手永远无法完成，请求被挡在 `connect()` 之前，30s 后超时。
+两层原因：
+
+1. **URL 构建错误**（主因）：`proxy_client.dart` 的握手 URL 由 `proxyUrl` 经
+   `Uri.parse` 派生，旧逻辑对"默认端口"判断有误——`Uri.hasPort` 对
+   `https://host`（未显式写端口）为 false，而 `uri.port` 回退为 `0`，被字符串拼成
+   `https://host:0/ws`。`:0` 端口无法拨号，且 scheme 没从 `https` 归一成 `wss`，
+   token 还被重复拼接。设备日志可证：
+   `Connection to 'https://hermes-proxy.willam.eu.org:0/ws?token=...#'` 的握手始终
+   `was not upgraded to websocket`。
+2. **`connect()` 非幂等**（次因）：并发调用 `connect()` 各自开一条 socket 并互相覆盖
+   `_channel`，导致晚到者永远 `await` 一条已废弃的连接，进而触发超时。
+
+**修复**:
+
+1. 新增 `_buildUri()`：统一归一化 scheme（https/wss→wss，其余→ws）、隐藏默认端口
+   （不再拼 `:0`）、只保留一次 `token`，彻底消除坏 URL。
+2. `connect()` 改为并发安全：用单一 `_connecting` Completer 共享同一次握手，晚到者
+   `join` 而非新开 socket；失败时清空状态以便重试；`disconnect()` 重置。
+3. `proxy_file_transport.get()` 在连接失败时断开并重试一次，避免单次握手抖动误报超时。
+
+**验证**：重新构建安装后 logcat 显示
+`[AUTO] Connected, got 3 servers` → `[ONCONNECTED] Proxy client connected!`
+→ `[FETCH] Got 77 sessions for server 185`，书架列表正常加载，超时消失。
+
+---
+
+## 已知限制
+
+1. **二进制文件经服务端传输会损坏**：`files/read` 走 JSON 字符串，非 ASCII 字节变
+   U+FFFD。文本格式不受影响；PDF/EPUB 除非服务端支持 `encoding=base64`，否则拿到的是
+   损坏内容。客户端已做污染检测与回退，但无法凭空还原字节。
+2. **PDF 文本质量**：纯 Dart 提取器覆盖普通字符串与 UTF-16BE 十六进制串；
+   依赖外部 ToUnicode CMap 的中文 PDF 会乱码，扫描件无文本可提（会显示说明文字而非报错）。
+   若日后网络可用，可换回 `pdfrx` 以获得完整字形映射。
+2. **GBK 编码**：中文老书常见的 GBK 仍无法解码，按 latin-1 兜底显示。
+3. **PDF / EPUB 仅文本**：不做版式渲染，阅读体验等同纯文本。
+4. `flutter_tts` 仍在使用 Kotlin Gradle Plugin，未来 Flutter 版本会构建失败，需关注插件升级。
+
+---
+
+## 下一步建议
+
+0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，
+   例如 `?encoding=base64` 输出 base64 字符串，或新增返回原始字节的 `files/raw`。
+   客户端已具备该能力的消费路径（见上文"二进制回退"），后端支持后 PDF/EPUB 即可完整读取。
+1. 真机试读一本 PDF 与一本 EPUB，确认提取质量是否满足需求
+2. 若 PDF 乱码严重，评估引入 PDFium（需要能访问 GitHub Release）或改用
+   服务端提取：让服务器返回已解析的文本
+3. 补充 GBK / GB18030 编码探测（`charset_converter` 或内置码表）
+4. 清理 `ebook_reader_screen.dart`（未接入导航的遗留屏幕，含未使用代码）
