@@ -434,24 +434,25 @@ class SessionMonitorService {
     }
 
     // State changes for existing sessions
+    // Only notify when: running → stopped (avoid noise for other state changes)
     for (final snap in current) {
       final prev = prevMap[snap.id];
       if (prev == null) continue;
 
-      if (prev.state != snap.state) {
-        if (snap.state == SessionState.stopped) {
-          final key = '${target.serverId}:${snap.id}';
-          final already = _stoppedNotified[key] ?? false;
-          if (!already) {
-            _stoppedNotified[key] = true;
-            _emitChange(SessionChange(
-              kind: SessionChangeKind.sessionStopped,
-              before: prev,
-              after: snap,
-              serverId: target.serverId,
-            ));
-          }
-        } else if (snap.state == SessionState.pending) {
+      if (prev.state == SessionState.running && snap.state == SessionState.stopped) {
+        final key = '${target.serverId}:${snap.id}';
+        final already = _stoppedNotified[key] ?? false;
+        if (!already) {
+          _stoppedNotified[key] = true;
+          _emitChange(SessionChange(
+            kind: SessionChangeKind.sessionStopped,
+            before: prev,
+            after: snap,
+            serverId: target.serverId,
+          ));
+        }
+      } else if (prev.state != snap.state) {
+        if (snap.state == SessionState.pending) {
           _emitChange(SessionChange(
             kind: SessionChangeKind.sessionNeedsInput,
             before: prev,
