@@ -34,6 +34,11 @@ dependencies:
   gbk_codec: ^0.4.0
   sherpa_onnx: ^1.13.8
 
+  # On-device tiny neural TTS (Ampixa sanoTTS), wired through native FFI.
+  sanotts_flutter:
+    path: ../sanotts_flutter
+  ffi: ^2.1.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -44,3 +49,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/tts/
+    # sanoTTS voice weights (en_us_e12nano.q8.front.bin / .decoder.bin) are
+    # dropped here at release time and are git-ignored; the dir is kept so the
+    # build stays valid when the blobs are absent.
+    - assets/sano/

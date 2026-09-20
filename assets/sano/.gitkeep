@@ -1,0 +1,4 @@
+# Place sanoTTS voice weights here at release time (git-ignored):
+#   en_us_e12nano.q8.front.bin
+#   en_us_e12nano.q8.decoder.bin
+# Downloaded from https://huggingface.co/ampixa/sanoTTS (voices-v1).

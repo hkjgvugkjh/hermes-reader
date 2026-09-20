@@ -225,6 +225,7 @@ class ReaderProvider extends ChangeNotifier {
     // an unrelated setting would jump the reader back to page 0.
     if (_content != null && config.charsPerPage != _lastPageChars) {
       _rebuildPages();
+      savePosition();
     }
     notifyListeners();
     _configStorage?.save(config);
@@ -415,6 +416,7 @@ class ReaderProvider extends ChangeNotifier {
     if (_pages.isEmpty) return;
     _pageIndex = index.clamp(0, _pages.length - 1);
     notifyListeners();
+    savePosition();
   }
 
   // ---- Annotations: bookmarks, notes, shared comments ----
@@ -561,6 +563,7 @@ class ReaderProvider extends ChangeNotifier {
     if (atEnd) return false;
     _pageIndex++;
     notifyListeners();
+    savePosition();
     return true;
   }
 
@@ -568,6 +571,7 @@ class ReaderProvider extends ChangeNotifier {
     if (atStart) return false;
     _pageIndex--;
     notifyListeners();
+    savePosition();
     return true;
   }
 

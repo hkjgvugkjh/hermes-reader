@@ -18,6 +18,7 @@ import 'reader/services/tts_service.dart';
 import 'reader/services/local_tts_source.dart';
 import 'reader/services/server_tts_source.dart';
 import 'reader/services/builtin_tts_source.dart';
+import 'reader/services/sano_tts_source.dart';
 import 'reader/screens/reader_home_screen.dart';
 import 'reader/screens/session_monitor_screen.dart';
 import 'reader/screens/task_list_screen.dart';
@@ -86,6 +87,7 @@ class HermesReaderApp extends StatelessWidget {
             serverSource: ServerTtsSource(baseUrl: ''),
             localSource: LocalTtsSource(),
             builtinSource: BuiltinTtsSource(),
+            sanoSource: SanoTtsSource(),
           ),
           update: (_, session, previous) {
             // Keep a single TtsService instance alive for the app's lifetime.

@@ -50,6 +50,10 @@ app.*.map.json
 /assets/tts/model.onnx
 /assets/tts/model.onnx.json
 /assets/tts/tokens.txt
+# sanoTTS voice weights (large binary, not committed; from Release voices-v2)
+/assets/sano/*.bin
+# sanoTTS espeak-ng data (built from vendored espeak-ng 1.53, not committed)
+/assets/sano/espeak-ng-data.zip
 
 # Generated / helper scripts (not committed)
 /scripts/gen_robot_icon.py

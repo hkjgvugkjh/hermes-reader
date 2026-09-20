@@ -32,6 +32,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   TtsService? _tts;
 
+  /// Cached so [dispose] can persist progress without reaching into the
+  /// (already unmounting) widget tree through [context].
+  ReaderProvider? _reader;
+
   /// How far the engine has got into the current page, in characters.
   int _charOffset = 0;
 
@@ -527,14 +531,15 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
             void apply(ReaderConfig next) {
               reader.updateConfig(next);
+              // Reflect the new engine choice on the live service immediately.
+              context.read<TtsService?>()?.setMode(next.ttsMode);
               setSheetState(() {});
             }
 
             return SafeArea(
-              child: Padding(
+              child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const Text('阅读设置',
@@ -584,6 +589,23 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         onChanged: (value) {
                           if (value == null) return;
                           apply(config.copyWith(commentSyncMode: value));
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('朗读引擎',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                            fontWeight: FontWeight.bold)),
+                    ...TtsMode.values.map(
+                      (mode) => RadioListTile<TtsMode>(
+                        title: Text(mode.label),
+                        value: mode,
+                        groupValue: config.ttsMode,
+                        onChanged: (value) {
+                          if (value == null) return;
+                          apply(config.copyWith(ttsMode: value));
                         },
                       ),
                     ),

@@ -48,9 +48,17 @@
 
 ### 语音朗读
 
-- **双引擎**：服务端合成优先，失败或离线自动降级到本机 `flutter_tts`
-  （`TtsMode.auto` / `server` / `local`）
+- **多引擎可选**：阅读设置中可显式选择朗读引擎 —— `自动`（优先本机，离线回退服务端）/
+  `仅服务端` / `仅本机系统 TTS` / `仅内置模型(sherpa-onnx)` / `仅 SanoTTS`
+  （`TtsMode.auto` / `server` / `local` / `builtin` / `sano`）。
+- **自动回退链**：`auto` 模式按 local → builtin(sherpa-onnx) → sano → server 顺序尝试，
+  任一引擎不可用自动降级到下一个，不中断朗读。
 - 降级时在顶部横幅说明原因，不中断朗读
+- **SanoTTS（新增）**：`仅 SanoTTS` 走 [sanoTTS](https://github.com/Ampixa/sanoTTS) 微型本机
+  神经 TTS，由独立插件 `hermes-application/sanotts_flutter`（原生 FFI）驱动，完全离线。
+  启用前需把语音权重 `heartnano.q8.{front,model}.bin`（GitHub Release `voices-v2`，已就位、
+  git-ignored）放入 `assets/sano/`，espeak-ng 提供方（text→音素 G2P）复用 App 已打包的
+  `libespeak-ng.so` + 自动解包的 `espeak-ng-data`。已在 Linux x86_64 端到端验证。
 - 自动翻页朗读：当前页读完且 `autoTurnPage` 开启时自动进入下一页，翻页同时更新朗读进度
 - **朗读进度记忆**：记录停在第几页、第几个字符，下次朗读从断点续读；读完自动清除
 - **历史播放点选择**：再次点击朗读时若存在其他页的播放点，弹出「继续朗读 / 朗读本页」选择；

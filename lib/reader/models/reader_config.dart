@@ -15,15 +15,21 @@ enum TapZoneMode {
 
 /// Which engine produces the audio when reading aloud.
 enum TtsMode {
-  /// Prefer the server (/api/hermes/tts/synthesize); fall back to local on
-  /// failure or when offline. This is the default.
-  auto('Auto (server, fallback local)'),
+  /// Prefer on-device engines, falling back to the server only when nothing
+  /// local works. Order: local → builtin(sherpa) → sano → server. Default.
+  auto('自动（优先本机，离线回退服务端）'),
 
   /// Always use the server engine. Fails loudly if unavailable.
-  server('Server only'),
+  server('仅服务端'),
 
-  /// Always use the on-device engine. Works offline.
-  local('Local only');
+  /// Always use the on-device system TTS (flutter_tts). Works offline.
+  local('仅本机系统 TTS'),
+
+  /// Always use the bundled offline neural model (sherpa-onnx / Piper).
+  builtin('仅内置模型 (sherpa-onnx)'),
+
+  /// Always use the on-device sanoTTS tiny neural model.
+  sano('仅 SanoTTS');
 
   const TtsMode(this.label);
   final String label;

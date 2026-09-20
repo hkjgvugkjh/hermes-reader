@@ -12,7 +12,11 @@ enum SpeechEngine {
   local('Local TTS'),
 
   /// On-device neural model bundled with the app (sherpa-onnx / Piper).
-  builtin('Builtin TTS');
+  builtin('Builtin TTS'),
+
+  /// On-device tiny neural model (Ampixa sanoTTS). Synthesis binding is wired
+  /// in [SanoTtsSource]; selectable once its model is available.
+  sano('SanoTTS');
 
   const SpeechEngine(this.label);
   final String label;
@@ -80,7 +84,8 @@ abstract class SpeechSource {
 ///
 ///   1. [SpeechEngine.local]  — system TTS (flutter_tts), when an engine exists.
 ///   2. [SpeechEngine.builtin] — offline neural model bundled with the app.
-///   3. [SpeechEngine.server]  — /api/hermes/tts/synthesize via the proxy.
+///   3. [SpeechEngine.sano]    — offline tiny neural model (Ampixa sanoTTS).
+///   4. [SpeechEngine.server]  — /api/hermes/tts/synthesize via the proxy.
 ///
 /// Any failure silently degrades to the next candidate so narration never
 /// stalls just because one engine is missing or the network is down.
@@ -89,14 +94,17 @@ class TtsService {
     required SpeechSource serverSource,
     required SpeechSource localSource,
     SpeechSource? builtinSource,
+    SpeechSource? sanoSource,
     this.connectivityCheck,
   })  : _server = serverSource,
         _local = localSource,
-        _builtin = builtinSource;
+        _builtin = builtinSource,
+        _sano = sanoSource;
 
   final SpeechSource _server;
   final SpeechSource _local;
   final SpeechSource? _builtin;
+  final SpeechSource? _sano;
 
   /// Optional reachability probe. When it returns false the server engine is
   /// skipped entirely, avoiding a slow timeout before the fallback.
@@ -118,6 +126,7 @@ class TtsService {
         SpeechEngine.builtin: _builtin == null
             ? false
             : await _builtin.isAvailable(),
+        SpeechEngine.sano: _sano == null ? false : await _sano.isAvailable(),
         SpeechEngine.server: await _server.isAvailable(),
       };
 
@@ -174,6 +183,7 @@ class TtsService {
   Future<void> _applyRate() async {
     await _local.setRate(_rate);
     await _builtin?.setRate(_rate);
+    await _sano?.setRate(_rate);
     await _server.setRate(_rate);
   }
 
@@ -204,6 +214,36 @@ class TtsService {
               return const SpeakResult(engine: SpeechEngine.builtin);
             } catch (_) {}
           }
+          _emit(TtsState.error);
+          rethrow;
+        }
+
+      case TtsMode.builtin:
+        _lastFallbackReason = null;
+        final builtin = _builtin;
+        if (builtin == null) {
+          _emit(TtsState.error);
+          throw Exception('builtin TTS engine not configured');
+        }
+        try {
+          await _speakWith(builtin, text);
+          return const SpeakResult(engine: SpeechEngine.builtin);
+        } catch (e) {
+          _emit(TtsState.error);
+          rethrow;
+        }
+
+      case TtsMode.sano:
+        _lastFallbackReason = null;
+        final sano = _sano;
+        if (sano == null) {
+          _emit(TtsState.error);
+          throw Exception('SanoTTS engine not configured');
+        }
+        try {
+          await _speakWith(sano, text);
+          return const SpeakResult(engine: SpeechEngine.sano);
+        } catch (e) {
           _emit(TtsState.error);
           rethrow;
         }
@@ -245,6 +285,23 @@ class TtsService {
         _lastFallbackReason = 'system TTS unavailable';
         return SpeakResult(
           engine: SpeechEngine.builtin,
+          fellBack: true,
+          fallbackReason: _lastFallbackReason,
+        );
+      } catch (e) {
+        _emit(TtsState.error);
+        // fall through to sano / server
+      }
+    }
+
+    // Second offline resort: tiny on-device sanoTTS model.
+    final sano = _sano;
+    if (sano != null && await sano.isAvailable()) {
+      try {
+        await _speakWith(sano, text);
+        _lastFallbackReason = 'on-device models unavailable';
+        return SpeakResult(
+          engine: SpeechEngine.sano,
           fellBack: true,
           fallbackReason: _lastFallbackReason,
         );
@@ -294,7 +351,7 @@ class TtsService {
   /// latency. Each engine's warm-up runs independently and failures are
   /// swallowed — availability is still decided at speak time.
   void warmUp() {
-    for (final s in [_server, _local, _builtin]) {
+    for (final s in [_server, _local, _builtin, _sano]) {
       if (s == null) continue;
       try {
         s.warmUp().catchError((_) {});
@@ -306,7 +363,7 @@ class TtsService {
   }
 
   Future<void> stop() async {
-    for (final s in [_server, _local, _builtin]) {
+    for (final s in [_server, _local, _builtin, _sano]) {
       if (s == null) continue;
       try {
         await s.stop();
@@ -318,7 +375,7 @@ class TtsService {
   }
 
   Future<void> dispose() async {
-    for (final s in [_server, _local, _builtin]) {
+    for (final s in [_server, _local, _builtin, _sano]) {
       await s?.dispose();
     }
     await _stateController.close();
