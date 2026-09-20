@@ -32,10 +32,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   TtsService? _tts;
 
-  /// Cached so [dispose] can persist progress without reaching into the
-  /// (already unmounting) widget tree through [context].
-  ReaderProvider? _reader;
-
   /// How far the engine has got into the current page, in characters.
   int _charOffset = 0;
 
