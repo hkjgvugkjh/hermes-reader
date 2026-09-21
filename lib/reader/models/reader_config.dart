@@ -116,7 +116,7 @@ class ReaderConfig {
     this.fontScale = 1.0,
     this.lineHeightFactor = 1.6,
     this.autoTurnPage = true,
-    this.tapZoneMode = TapZoneMode.whole,
+    this.tapZoneMode = TapZoneMode.thirds,
     this.leftZoneForward = false,
     this.commentSyncMode = CommentSyncMode.server,
   }) : assert(charsPerPage > 0, 'charsPerPage must be positive');

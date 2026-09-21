@@ -476,10 +476,15 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                   ? localPos.dx / renderBox.size.width
                                   : 0.5;
 
-                              // In fullscreen mode, any tap toggles back to
-                              // non-fullscreen (with controls visible).
+                              // In fullscreen mode: left/right zones navigate,
+                              // center tap returns to non-fullscreen.
                               if (_isFullscreen) {
-                                setState(() => _isFullscreen = false);
+                                if (reader.config.tapZoneMode == TapZoneMode.thirds &&
+                                    reader.isToggleZone(fraction)) {
+                                  setState(() => _isFullscreen = false);
+                                } else {
+                                  reader.handleTap(fraction);
+                                }
                                 return;
                               }
 
