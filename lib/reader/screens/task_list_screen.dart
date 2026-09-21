@@ -192,14 +192,28 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
     }
     setState(() => _sending = true);
     try {
-      await proxyClient.sendAuthResponse(
-        reqId: widget.task.id,
-        serverId: widget.task.serverId,
-        result: {
-          'choice': choice,
-          'confirmed': choice != '拒绝' && choice != '取消',
-        },
-      );
+      // Determine task type and send the appropriate response.
+      // Auth tasks use req_id + server_id; clarify tasks use session_id + clarify_id.
+      final isClarify = widget.task.description.startsWith('来自会话');
+      if (isClarify) {
+        // Extract session_id from description (format: "来自会话 $sessionId 的确认请求")
+        final desc = widget.task.description;
+        final sessionId = desc.replaceFirst('来自会话 ', '').replaceFirst(' 的确认请求', '');
+        await proxyClient.sendClarifyResponse(
+          sessionId: sessionId,
+          clarifyId: widget.task.id,
+          response: choice,
+        );
+      } else {
+        await proxyClient.sendAuthResponse(
+          reqId: widget.task.id,
+          serverId: widget.task.serverId,
+          result: {
+            'choice': choice,
+            'confirmed': choice != '拒绝' && choice != '取消',
+          },
+        );
+      }
       if (!mounted) return;
       // Mark resolved and return to the previous screen.
       context.read<TaskProvider>().resolve(widget.task.id);

@@ -19,6 +19,7 @@ class SessionProvider extends ChangeNotifier {
   StreamSubscription<SessionChange>? _changeSub;
   StreamSubscription<Map<String, dynamic>>? _diSub;
   StreamSubscription<Map<String, dynamic>>? _authSub;
+  StreamSubscription<Map<String, dynamic>>? _diEventSub;
   final List<SessionChange> _recentChanges = [];
   bool _initialized = false;
   reader_proxy.ProxyClient? _proxyClient;
@@ -380,6 +381,9 @@ class SessionProvider extends ChangeNotifier {
     // Subscribe to backend authorization requests (DI 0x39) and surface them
     // as pending tasks in 待处理事项.
     _authSub = client.authRequests.listen(_onDIAuthRequest);
+    // Subscribe to opaque DI events (DI 0x3B) and surface clarify.requested
+    // as pending tasks with selectable choices.
+    _diEventSub = client.diEvents.listen(_onDIEvent);
     // Also pass to monitor service for DI polling
     _monitor?.setProxyClient(client);
     notifyListeners();
@@ -423,6 +427,46 @@ class SessionProvider extends ChangeNotifier {
       createdAt: DateTime.now(),
       timeoutAt: timeoutAt,
       priority: TaskPriority.high,
+      resolved: false,
+    );
+    taskProvider.addTask(task);
+  }
+
+  /// Handle an opaque DI event (0x3B) pushed by the proxy. Currently used to
+  /// surface `clarify.requested` dialogs as pending tasks in 待处理事项.
+  void _onDIEvent(Map<String, dynamic> event) {
+    final taskProvider = _taskProvider;
+    if (taskProvider == null) return;
+
+    final eventName = (event['event'] ?? '').toString();
+    if (eventName != 'clarify.requested') return;
+
+    final data = event['data'];
+    if (data is! Map) return;
+
+    final sessionId = (data['session_id'] ?? '').toString();
+    final clarifyId = (data['clarify_id'] ?? '').toString();
+    final question = (data['question'] ?? '').toString();
+    final choicesRaw = data['choices'];
+    final List<String> choices = choicesRaw is List
+        ? choicesRaw.map((e) => e.toString()).toList()
+        : <String>[];
+    final timeoutMs = data['timeout_ms'];
+    final DateTime? timeoutAt = timeoutMs is int
+        ? DateTime.now().add(Duration(milliseconds: timeoutMs))
+        : null;
+
+    if (clarifyId.isEmpty) return;
+
+    final task = TaskItem(
+      id: clarifyId,
+      title: question.isNotEmpty ? question : '需要您确认',
+      description: '来自会话 $sessionId 的确认请求',
+      serverId: '',
+      createdAt: DateTime.now(),
+      timeoutAt: timeoutAt,
+      priority: TaskPriority.high,
+      choices: choices,
       resolved: false,
     );
     taskProvider.addTask(task);

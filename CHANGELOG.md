@@ -1,5 +1,12 @@
 # ChangeLog
 
+## 2026-09-20（已实现）
+- **新增 clarify 双向事件流**：支持后端通过 `/chat-run` 命名空间发送的 `clarify.requested` 事件，
+  在待处理事项中展示选项供用户选择，并通过 `clarify.respond` 回传用户选择。
+- `SessionProvider` 新增 `_diEventSub` 订阅 DI 事件流 (0x3B)，解析 `clarify.requested` 并创建 TaskItem。
+- `TaskListScreen._submit` 根据任务类型分发：clarify 任务调用 `sendClarifyResponse`，auth 任务调用 `sendAuthResponse`。
+- 依赖 hermes-shared 新增的 `sendClarifyResponse` 方法。
+
 ## 2026-09-18（已实现 · 已 Linux 端到端验证）
 - **新增 sanoTTS 引擎 + 引擎可选（真实集成）**：为 hermes-reader 增加
   [sanoTTS](https://github.com/Ampixa/sanoTTS) 本机离线神经 TTS 引擎（微型模型，294K–2.27M
