@@ -272,6 +272,15 @@ class ReaderProvider extends ChangeNotifier {
   int get pageCount => _pages.length;
   bool get hasBook => _pages.isNotEmpty;
 
+  /// Full-screen reading mode (no app bar, no footer, just text).
+  bool _isFullscreen = false;
+  bool get isFullscreen => _isFullscreen;
+
+  void toggleFullscreen() {
+    _isFullscreen = !_isFullscreen;
+    notifyListeners();
+  }
+
   BookPage? get currentPage =>
       (_pages.isEmpty || _pageIndex >= _pages.length) ? null : _pages[_pageIndex];
 
@@ -548,12 +557,31 @@ class ReaderProvider extends ChangeNotifier {
 
   /// Replaces the current page layout with pre-computed pages (e.g. produced by
   /// the screen using real screen/font metrics via [PaginatorService.paginateWithLayout]).
-  void setPages(List<BookPage> pages) {
+  ///
+  /// When [preserveOffset] is true (e.g. after a fullscreen toggle) the current
+  /// page's [startOffset] is remembered and the new page list is scanned for the
+  /// page that contains it, so the reader stays on the same text after the
+  /// layout change.
+  void setPages(List<BookPage> pages, {bool preserveOffset = false}) {
     if (pages.isEmpty) return;
+    final oldOffset = preserveOffset && _pages.isNotEmpty && _pageIndex < _pages.length
+        ? _pages[_pageIndex].startOffset
+        : null;
     _pages
       ..clear()
       ..addAll(pages);
-    if (_pageIndex >= _pages.length) {
+    if (oldOffset != null) {
+      // Find the page containing the old offset.
+      var idx = 0;
+      for (var i = 0; i < _pages.length; i++) {
+        if (_pages[i].startOffset <= oldOffset) {
+          idx = i;
+        } else {
+          break;
+        }
+      }
+      _pageIndex = idx;
+    } else if (_pageIndex >= _pages.length) {
       _pageIndex = _pages.length - 1;
     }
     notifyListeners();

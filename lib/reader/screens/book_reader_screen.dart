@@ -30,6 +30,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   String? _fallbackNotice;
   String? _encodingLabel;
 
+  /// Full-screen reading mode (no app bar, no footer, just text).
+  bool _isFullscreen = false;
+
   TtsService? _tts;
 
   /// How far the engine has got into the current page, in characters.
@@ -360,7 +363,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                   icon: const Icon(Icons.edit_note),
                   label: const Text('批注选区'),
                 ),
-          appBar: _controlsVisible
+          appBar: (_controlsVisible && !_isFullscreen)
               ? AppBar(
                   title: Text(book?.title ?? '阅读'),
                   actions: [
@@ -426,7 +429,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
               ? const Center(child: Text('没有可显示的内容'))
               : Column(
                   children: [
-                    if (_fallbackNotice != null && _controlsVisible)
+                    if (_fallbackNotice != null && _controlsVisible && !_isFullscreen)
                       _FallbackBanner(reason: _fallbackNotice!),
                     Expanded(
                       child: LayoutBuilder(
@@ -443,7 +446,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                             final key =
                                 '${content.text.length}:$fontScale:'
                                 '${constraints.maxWidth.toInt()}:'
-                                '${constraints.maxHeight.toInt()}';
+                                '${constraints.maxHeight.toInt()}:'
+                                '$_isFullscreen';
                             if (key != _layoutKey) {
                               _layoutKey = key;
                               final pages = PaginatorService()
@@ -455,8 +459,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                 breakOffsets: content.pageBreaks,
                               );
                               // Apply after this frame to avoid notify-during-build.
-                              WidgetsBinding.instance
-                                  .addPostFrameCallback((_) => reader.setPages(pages));
+                              // Preserve the current page offset so the reader
+                              // stays on the same text after a fullscreen toggle.
+                              WidgetsBinding.instance.addPostFrameCallback(
+                                  (_) => reader.setPages(pages, preserveOffset: true));
                             }
                           }
                           return GestureDetector(
@@ -469,6 +475,20 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               final fraction = renderBox.size.width > 0
                                   ? localPos.dx / renderBox.size.width
                                   : 0.5;
+
+                              // In fullscreen mode, any tap toggles back to
+                              // non-fullscreen (with controls visible).
+                              if (_isFullscreen) {
+                                setState(() => _isFullscreen = false);
+                                return;
+                              }
+
+                              // In three-zone mode, center tap toggles fullscreen.
+                              if (reader.config.tapZoneMode == TapZoneMode.thirds &&
+                                  reader.isToggleZone(fraction)) {
+                                setState(() => _isFullscreen = true);
+                                return;
+                              }
 
                               if (reader.isToggleZone(fraction)) {
                                 _toggleControls();
@@ -492,7 +512,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         },
                       ),
                     ),
-                    if (_controlsVisible)
+                    if (_controlsVisible && !_isFullscreen)
                       _ReaderFooter(
                         pageIndex: reader.pageIndex,
                         pageCount: reader.pageCount,
