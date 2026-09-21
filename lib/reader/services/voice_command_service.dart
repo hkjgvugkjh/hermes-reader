@@ -26,8 +26,6 @@ class VoiceCommandService {
   bool _recording = false;
   bool get isRecording => _recording;
 
-  String? _currentPath;
-
   /// Request microphone permission (call before first [start]).
   Future<bool> ensurePermission() async {
     return await _recorder.hasPermission();
@@ -46,7 +44,6 @@ class VoiceCommandService {
       const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000),
       path: path,
     );
-    _currentPath = path;
     _recording = true;
   }
 
@@ -55,7 +52,6 @@ class VoiceCommandService {
     if (!_recording) return null;
     final path = await _recorder.stop();
     _recording = false;
-    _currentPath = null;
     return path;
   }
 

@@ -434,10 +434,7 @@ class SessionProvider extends ChangeNotifier {
             req['name'] ??
             (prompt.length > 20 ? prompt.substring(0, 20) : prompt))
         .toString();
-    final choicesRaw = req['choices'];
-    final List<String> choices = choicesRaw is List
-        ? choicesRaw.map((e) => e.toString()).toList()
-        : <String>[];
+    // choices stored in task for clarify responses
     final timeoutMs = req['timeout_ms'];
     final DateTime? timeoutAt = timeoutMs is int
         ? DateTime.now().add(Duration(milliseconds: timeoutMs))
@@ -509,7 +506,7 @@ class SessionProvider extends ChangeNotifier {
 
   void _onDIUpdate(Map<String, dynamic> update) {
     final serverId = update['server_id'] as String? ?? '';
-    final full = update['full'] as bool? ?? false;
+    // full update flag - currently unused but kept for future use
     final sessions = update['sessions'] as List? ?? [];
 
     for (final s in sessions) {

@@ -20,9 +20,7 @@ import 'reader/services/server_tts_source.dart';
 import 'reader/services/builtin_tts_source.dart';
 import 'reader/services/sano_tts_source.dart';
 import 'reader/screens/reader_home_screen.dart';
-import 'reader/screens/session_monitor_screen.dart';
 import 'reader/screens/task_list_screen.dart';
-import 'reader/models/book.dart';
 import 'reader/models/global_config.dart';
 import 'reader/services/direct_file_transport.dart';
 import 'reader/services/proxy_file_transport.dart';
@@ -1484,7 +1482,6 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
   String? _error;
   Timer? _pollTimer;
   Timer? _autoRefreshTimer;
-  String? _shownServerId;
   bool _onlyActive = false;
   final Set<String> _alerted = {};
 
@@ -1533,7 +1530,6 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
 
   /// Called when the user picks a different server in the app bar.
   void onServerSwitched(String? serverId) {
-    _shownServerId = serverId;
     if (serverId == null) return;
     // Rebuild immediately so the header/list follow the selection, then
     // (re)fetch just that server in the background.
@@ -1700,7 +1696,7 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
         for (final server in serverProvider.servers) {
           try {
             print('[FETCH] Connecting to server ${server.id}...');
-            await proxyClient!.connectServer(
+            await proxyClient.connectServer(
               server.id,
               username: server.username,
               password: server.password,
@@ -2033,58 +2029,6 @@ class _SessionMonitorTabState extends State<_SessionMonitorTab> {
     String two(int v) => v.toString().padLeft(2, '0');
     return '${t.year}-${two(t.month)}-${two(t.day)} '
         '${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
-  }
-
-  Widget _oldBuild(BuildContext context) {
-    final serverProvider = context.watch<ServerProvider>();
-    final theme = Theme.of(context);
-    return RefreshIndicator(
-      onRefresh: _fetchAllSessions,
-      child: ListView.builder(
-        itemCount: serverProvider.servers.length,
-        itemBuilder: (context, index) {
-          final server = serverProvider.servers[index];
-          final sessions = _serverSessions[server.id] ?? [];
-
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                color: theme.colorScheme.surfaceContainerHighest,
-                child: Row(
-                  children: [
-                    Icon(
-                      server.isOnline ? Icons.cloud_done : Icons.cloud_off,
-                      size: 16,
-                      color: server.isOnline ? Colors.green : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(server.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    const Spacer(),
-                    Text('${sessions.length} 个会话', style: TextStyle(color: theme.disabledColor, fontSize: 12)),
-                  ],
-                ),
-              ),
-              ...sessions.map((s) => ListTile(
-                leading: Icon(
-                  s.state == SessionState.running ? Icons.play_circle :
-                  s.state == SessionState.stopped ? Icons.stop_circle :
-                  s.state == SessionState.pending ? Icons.help_outline :
-                  Icons.error,
-                  color: s.state == SessionState.running ? Colors.green :
-                         s.state == SessionState.stopped ? Colors.grey :
-                         s.state == SessionState.pending ? Colors.orange : Colors.red,
-                ),
-                title: Text(s.title),
-                subtitle: Text('${s.lastActivity}'),
-                trailing: Text(s.state.name, style: const TextStyle(fontSize: 11)),
-              )),
-            ],
-          );
-        },
-      ),
-    );
   }
 }
 

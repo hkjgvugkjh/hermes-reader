@@ -31,7 +31,7 @@ class ServerCommentSync implements CommentSync {
     if (body.isEmpty) return const [];
     try {
       final data = jsonDecode(body);
-      final list = (data is List ? data : data['comments'] as List? ?? []) as List;
+      final list = data is List ? data : data['comments'] as List? ?? [];
       return list.map((e) => SharedComment.fromJson(e as Map<String, dynamic>)).toList();
     } catch (_) {
       return const [];
