@@ -10,6 +10,23 @@ import '../services/voice_command_service.dart';
 import '../providers/task_provider.dart';
 import '../models/hive_models.dart';
 
+/// A clarify request that should be shown as a global dialog.
+class ClarifyRequest {
+  final String sessionId;
+  final String clarifyId;
+  final String question;
+  final List<String> choices;
+  final DateTime? timeoutAt;
+
+  ClarifyRequest({
+    required this.sessionId,
+    required this.clarifyId,
+    required this.question,
+    required this.choices,
+    this.timeoutAt,
+  });
+}
+
 /// Owns the [SessionMonitorService] and exposes its state to the UI.
 /// Also listens to DI session updates from the proxy client.
 class SessionProvider extends ChangeNotifier {
@@ -24,6 +41,13 @@ class SessionProvider extends ChangeNotifier {
   bool _initialized = false;
   reader_proxy.ProxyClient? _proxyClient;
   TaskProvider? _taskProvider;
+
+  /// Stream controller for clarify requests that should pop up globally.
+  final StreamController<ClarifyRequest> _clarifyController =
+      StreamController<ClarifyRequest>.broadcast();
+
+  /// Stream of clarify requests for the UI to listen to.
+  Stream<ClarifyRequest> get clarifyRequests => _clarifyController.stream;
 
   List<SessionChange> get recentChanges => List.unmodifiable(_recentChanges);
   bool get isInitialized => _initialized;
@@ -433,7 +457,8 @@ class SessionProvider extends ChangeNotifier {
   }
 
   /// Handle an opaque DI event (0x3B) pushed by the proxy. Currently used to
-  /// surface `clarify.requested` dialogs as pending tasks in 待处理事项.
+  /// surface `clarify.requested` dialogs as pending tasks in 待处理事项 and
+  /// push them as global dialog requests.
   void _onDIEvent(Map<String, dynamic> event) {
     final taskProvider = _taskProvider;
     if (taskProvider == null) return;
@@ -458,6 +483,16 @@ class SessionProvider extends ChangeNotifier {
 
     if (clarifyId.isEmpty) return;
 
+    // Push to global dialog stream
+    _clarifyController.add(ClarifyRequest(
+      sessionId: sessionId,
+      clarifyId: clarifyId,
+      question: question.isNotEmpty ? question : '需要您确认',
+      choices: choices,
+      timeoutAt: timeoutAt,
+    ));
+
+    // Also add to task list
     final task = TaskItem(
       id: clarifyId,
       title: question.isNotEmpty ? question : '需要您确认',
@@ -583,6 +618,8 @@ void _onChange(SessionChange change) {
     _changeSub?.cancel();
     _diSub?.cancel();
     _authSub?.cancel();
+    _diEventSub?.cancel();
+    _clarifyController.close();
     _monitor?.dispose();
     super.dispose();
   }
