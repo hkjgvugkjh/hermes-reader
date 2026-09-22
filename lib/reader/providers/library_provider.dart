@@ -232,11 +232,26 @@ class ReaderProvider extends ChangeNotifier {
       savePosition();
     }
     // Font size change invalidates all chapter page caches — the pages were
-    // computed for the old font metrics. Clear caches only; LayoutBuilder
-    // will re-trigger ensureChapterPages with the new font on next build.
-    // Keep _pages intact so the reader doesn't flash empty while recomputing.
+    // computed for the old font metrics. Clear caches and recompute.
     if (fontChanged && _content != null) {
       _chapterPages.clear();
+      // Recompute for the current chapter with the new font
+      final chapterIdx = currentChapterIndex;
+      if (chapterIdx >= 0) {
+        final fontScale = config.fontScale;
+        final style = TextStyle(
+          fontSize: 17 * fontScale,
+          height: config.lineHeightFactor,
+        );
+        ensureChapterPages(
+          chapterIdx,
+          style: style,
+          maxWidth: 360,  // approximate, will be recalculated by LayoutBuilder
+          maxHeight: 600,
+          nonFullscreenMaxHeight: 500,
+          force: true,
+        );
+      }
     }
     notifyListeners();
     _configStorage?.save(config);

@@ -453,7 +453,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                             final fontScale = reader.config.fontScale;
                             final style = TextStyle(
                               fontSize: 17 * fontScale,
-                              height: 1.7 * fontScale.clamp(1.0, 1.3),
+                              height: reader.config.lineHeightFactor,
                             );
                             final key =
                                 '${content.text.length}:$fontScale:'
@@ -687,6 +687,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   /// Shows the detected table of contents as a bottom sheet; tapping an entry
   /// jumps to that chapter's first page.
+  final ScrollController _chapterListScrollController = ScrollController();
+
   void _showChapterList(ReaderProvider reader) {
     final current = reader.currentChapterIndex;
     showModalBottomSheet<void>(
@@ -701,6 +703,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
             ),
             Expanded(
               child: ListView.builder(
+                controller: _chapterListScrollController,
                 itemCount: reader.chapters.length,
                 itemBuilder: (_, i) {
                   final ch = reader.chapters[i];
@@ -734,7 +737,27 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
           ],
         ),
       ),
-    );
+    ).then((_) {
+      // Scroll to current chapter after the sheet is dismissed
+      if (current >= 0 && _chapterListScrollController.hasClients) {
+        // This won't work after dismissal — the controller is disposed
+      }
+    });
+    // Scroll to current chapter after the bottom sheet is shown
+    if (current >= 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_chapterListScrollController.hasClients) {
+          final itemExtent = 56.0; // approximate ListTile height
+          final targetOffset = (current * itemExtent)
+              .clamp(0.0, _chapterListScrollController.position.maxScrollExtent);
+          _chapterListScrollController.animateTo(
+            targetOffset,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
   }
 
   /// Shows a page-number jump dialog with a slider and a numeric field.
