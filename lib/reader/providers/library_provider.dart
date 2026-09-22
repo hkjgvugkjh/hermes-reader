@@ -434,13 +434,13 @@ class ReaderProvider extends ChangeNotifier {
   bool _paginating = false;
   bool get isPaginating => _paginating;
 
-  /// Runs [paginateWithLayout] off the UI thread and applies the result.
+  /// Runs [paginateWithLayout] in a background isolate and applies the result.
   ///
   /// [PaginatorService.paginateWithLayout] can take several seconds for large
   /// books because it lays out every paragraph with TextPainter. Running it
   /// synchronously in the build method blocks the main thread and triggers
-  /// ANR — this method defers it to the next microtask and shows a progress
-  /// indicator until the pages are ready.
+  /// ANR — this method offloads it to a background isolate and shows a
+  /// progress indicator until the pages are ready.
   Future<void> paginateAsync(
     String text,
     TextStyle style,
@@ -454,15 +454,13 @@ class ReaderProvider extends ChangeNotifier {
     // Defer to next frame so the spinner paints before the heavy work starts.
     await WidgetsBinding.instance.endOfFrame;
 
-    final pages = await Future(() {
-      return PaginatorService().paginateWithLayout(
-        text,
-        style: style,
-        maxWidth: maxWidth,
-        maxHeight: maxHeight,
-        breakOffsets: breakOffsets,
-      );
-    });
+    final pages = await PaginatorService.paginateWithLayoutIsolate(
+      text,
+      style: style,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      breakOffsets: breakOffsets,
+    );
 
     _pages
       ..clear()

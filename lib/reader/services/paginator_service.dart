@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
@@ -126,6 +127,34 @@ class PaginatorService {
         .where((s) => s.trim().isNotEmpty)
         .toList();
     return _flowBlocks(paragraphs, style, maxWidth, maxHeight);
+  }
+
+  /// Runs [paginateWithLayout] in a background isolate.
+  ///
+  /// [paginateWithLayout] calls [TextPainter.layout] for every paragraph —
+  /// which can take several seconds for large books (tens of thousands of
+  /// paragraphs). Running it on the UI thread causes jank and ANR. This
+  /// method offloads the work to a background isolate and returns the
+  /// computed pages.
+  ///
+  /// [TextStyle] cannot be sent across isolate boundaries directly, so its
+  /// parameters are packed into a map and rebuilt inside the worker isolate.
+  static Future<List<BookPage>> paginateWithLayoutIsolate(
+    String text, {
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    List<int>? breakOffsets,
+  }) async {
+    final params = _IsolateParams(
+      text: text,
+      fontSize: style.fontSize ?? 17,
+      heightFactor: style.height ?? 1.0,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      breakOffsets: breakOffsets,
+    );
+    return Isolate.run(() => _paginateInIsolate(params));
   }
 
   /// Lays [blocks] (paragraphs) out into pages that never exceed [maxHeight].
@@ -490,4 +519,38 @@ extension _SplitMapped on String {
 extension PaginateContent on BookContent {
   List<BookPage> pages({int? charsPerPage}) =>
       PaginatorService().paginate(text, charsPerPage: charsPerPage);
+}
+
+/// Parameters for isolate-based pagination.
+class _IsolateParams {
+  final String text;
+  final double fontSize;
+  final double heightFactor;
+  final double maxWidth;
+  final double maxHeight;
+  final List<int>? breakOffsets;
+
+  const _IsolateParams({
+    required this.text,
+    required this.fontSize,
+    required this.heightFactor,
+    required this.maxWidth,
+    required this.maxHeight,
+    this.breakOffsets,
+  });
+}
+
+/// Top-level function that runs inside the worker isolate.
+List<BookPage> _paginateInIsolate(_IsolateParams params) {
+  final style = TextStyle(
+    fontSize: params.fontSize,
+    height: params.heightFactor,
+  );
+  return PaginatorService().paginateWithLayout(
+    params.text,
+    style: style,
+    maxWidth: params.maxWidth,
+    maxHeight: params.maxHeight,
+    breakOffsets: params.breakOffsets,
+  );
 }
