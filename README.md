@@ -57,6 +57,20 @@
 - 根据需要的章节进行分页计算，不需要全书分页计算
 - 章节首次分页仅处理 5 页，后续分页在处理完翻页后，再增量处理
 
+#### 实现细节
+
+- **数据模型**：`ChapterPageInfo` 存储章节的双模式页码列表，`PageEntry` 记录每页的首字符偏移
+- **分页服务**：`PaginatorService.paginateChapter` 支持增量分页（`initialBatch=5` 首次5页，`initialBatch=-1` 计算全部）
+- **章节扫描**：`scanChapters` 使用 breakOffsets（PDF/EPUB 边界）或 Markdown 标题检测
+- **ReaderProvider**：管理章节分页缓存，`ensureChapterPages` 按需计算前5页，`computeRemainingChapterPages` 翻页后增量计算
+- **BookReaderScreen**：触发章节分页计算，显示加载指示器
+- **字体变化**：`updateConfig` 检测 fontScale 变化，清除 `_chapterPages` 缓存，LayoutBuilder 自动用新字体触发重新计算
+
+#### 变更记录
+
+- 2026-09-22: 修复字体变化不更新分页（清除 `_chapterPages` 缓存而非 `_pages`，LayoutBuilder 自动重算）
+- 2026-09-22: 修复通知点击无响应（NotificationService 添加 `onDidReceiveNotificationResponse` 回调，navigatorKey 全局导航，SessionMonitorScreen 支持 initialServerId/initialSessionId 自动打开会话）
+
 #### 分页信息结构
 
 ```
