@@ -37,6 +37,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   double? _pendingChapterScrollFraction;
   int? _pendingChapterPageIndex;
 
+  /// Annotation mode: when true, text selection is enabled and tapping does
+  /// not navigate pages.
+  bool _annotationMode = false;
+
   TtsService? _tts;
 
   /// How far the engine has got into the current page, in characters.
@@ -423,6 +427,11 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       },
                     ),
                     IconButton(
+                      icon: Icon(_annotationMode ? Icons.edit : Icons.edit_outlined),
+                      tooltip: _annotationMode ? '退出批注' : '批注模式',
+                      onPressed: () => setState(() => _annotationMode = !_annotationMode),
+                    ),
+                    IconButton(
                       icon: const Icon(Icons.comment_outlined),
                       tooltip: '书评',
                       onPressed: () => _showComments(),
@@ -473,6 +482,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                           return GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onTapUp: (details) {
+                              // In annotation mode, let SelectableText handle taps.
+                              if (_annotationMode) return;
+
                               final renderBox =
                                   context.findRenderObject() as RenderBox;
                               final localPos = renderBox
@@ -680,7 +692,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
           children: [
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text('目录',
+              child: Text('选择章节',
                   style: Theme.of(context).textTheme.titleMedium),
             ),
             Expanded(
@@ -902,9 +914,49 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       final text = content.substring(last, m.start);
       if (text.isNotEmpty) {
         final base = last;
+        if (_annotationMode) {
+          widgets.add(
+            SelectableText(
+              text,
+              style: style,
+              textAlign: TextAlign.justify,
+              onSelectionChanged: onSelection == null
+                  ? null
+                  : (sel, _) {
+                      if (!sel.isValid || sel.isCollapsed) {
+                        onSelection(page.startOffset + base, page.startOffset + base, '');
+                        return;
+                      }
+                      onSelection(
+                        page.startOffset + base + sel.start,
+                        page.startOffset + base + sel.end,
+                        text.substring(sel.start, sel.end),
+                      );
+                    },
+            ),
+          );
+        } else {
+          widgets.add(
+            Text(
+              text,
+              style: style,
+              textAlign: TextAlign.justify,
+            ),
+          );
+        }
+      }
+      final index = int.tryParse(m.group(1)!);
+      final img = index != null && index < images.length ? images[index] : null;
+      if (img != null) widgets.add(_buildImage(img, maxWidth));
+      last = m.end;
+    }
+    final tail = content.substring(last);
+    if (tail.isNotEmpty) {
+      final base = last;
+      if (_annotationMode) {
         widgets.add(
           SelectableText(
-            text,
+            tail,
             style: style,
             textAlign: TextAlign.justify,
             onSelectionChanged: onSelection == null
@@ -917,40 +969,20 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                     onSelection(
                       page.startOffset + base + sel.start,
                       page.startOffset + base + sel.end,
-                      text.substring(sel.start, sel.end),
+                      tail.substring(sel.start, sel.end),
                     );
                   },
           ),
         );
+      } else {
+        widgets.add(
+          Text(
+            tail,
+            style: style,
+            textAlign: TextAlign.justify,
+          ),
+        );
       }
-      final index = int.tryParse(m.group(1)!);
-      final img = index != null && index < images.length ? images[index] : null;
-      if (img != null) widgets.add(_buildImage(img, maxWidth));
-      last = m.end;
-    }
-    final tail = content.substring(last);
-    if (tail.isNotEmpty) {
-      final base = last;
-      widgets.add(
-        SelectableText(
-          tail,
-          style: style,
-          textAlign: TextAlign.justify,
-          onSelectionChanged: onSelection == null
-              ? null
-              : (sel, _) {
-                  if (!sel.isValid || sel.isCollapsed) {
-                    onSelection(page.startOffset + base, page.startOffset + base, '');
-                    return;
-                  }
-                  onSelection(
-                    page.startOffset + base + sel.start,
-                    page.startOffset + base + sel.end,
-                    tail.substring(sel.start, sel.end),
-                  );
-                },
-        ),
-      );
     }
 
     final scrollView = SingleChildScrollView(
