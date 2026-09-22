@@ -17,12 +17,22 @@ class NotificationService {
   bool _inited = false;
   int _nextId = 0;
 
+  /// Callback invoked when a notification is tapped. Set by the app to
+  /// navigate to the relevant session.
+  void Function(String? payload)? onNotificationTap;
+
   Future<void> init() async {
     if (_inited) return;
     const androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
     const initSettings = InitializationSettings(android: androidSettings);
-    await _plugin.initialize(initSettings);
+    await _plugin.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: (NotificationResponse response) {
+        // Handle notification tap
+        onNotificationTap?.call(response.payload);
+      },
+    );
     if (Platform.isAndroid) {
       await _requestPermission();
     }
@@ -41,31 +51,35 @@ class NotificationService {
     if (!_inited) return;
     switch (change.kind) {
       case SessionChangeKind.sessionStarted:
-        _notify(
+        notifyWithSession(
           '新会话启动',
           change.after?.title ?? '未知会话',
-          '服务器 ${change.serverId}',
+          change.serverId,
+          change.after?.id ?? '',
         );
         break;
       case SessionChangeKind.sessionStopped:
-        _notify(
+        notifyWithSession(
           '会话已停止',
           change.before?.title ?? change.after?.title ?? '未知会话',
-          '服务器 ${change.serverId}',
+          change.serverId,
+          change.after?.id ?? change.before?.id ?? '',
         );
         break;
       case SessionChangeKind.sessionNeedsInput:
-        _notify(
+        notifyWithSession(
           '会话需要处理',
           change.after?.title ?? '未知会话',
-          '请在应用中查看详情',
+          change.serverId,
+          change.after?.id ?? '',
         );
         break;
       case SessionChangeKind.sessionResumed:
-        _notify(
+        notifyWithSession(
           '会话已恢复',
           change.after?.title ?? '未知会话',
-          '服务器 ${change.serverId}',
+          change.serverId,
+          change.after?.id ?? '',
         );
         break;
       case SessionChangeKind.authRequired:
@@ -98,7 +112,16 @@ class NotificationService {
       title,
       body,
       const NotificationDetails(android: androidDetails),
+      payload: payload,
     );
+  }
+
+  /// Display a notification with session info encoded in payload.
+  ///
+  /// The payload format is `serverId:sessionId` so the app can navigate to
+  /// the correct session when the notification is tapped.
+  void notifyWithSession(String title, String body, String serverId, String sessionId) {
+    _notify(title, body, '$serverId:$sessionId');
   }
 
   void dispose() {

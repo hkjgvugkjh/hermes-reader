@@ -232,11 +232,11 @@ class ReaderProvider extends ChangeNotifier {
       savePosition();
     }
     // Font size change invalidates all chapter page caches — the pages were
-    // computed for the old font metrics. Clear caches; LayoutBuilder will
-    // re-trigger with the correct constraints and new font on next build.
+    // computed for the old font metrics. Clear caches only; LayoutBuilder
+    // will re-trigger ensureChapterPages with the new font on next build.
+    // Keep _pages intact so the reader doesn't flash empty while recomputing.
     if (fontChanged && _content != null) {
       _chapterPages.clear();
-      _rebuildPages();
     }
     notifyListeners();
     _configStorage?.save(config);

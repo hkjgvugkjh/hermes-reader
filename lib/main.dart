@@ -13,6 +13,8 @@ import 'reader/providers/server_provider.dart';
 import 'reader/providers/debug_logger.dart';
 import 'reader/services/library_service.dart';
 import 'reader/services/reader_config_storage.dart';
+import 'reader/services/notification_service.dart';
+import 'reader/screens/session_monitor_screen.dart';
 import 'reader/services/external_library_dir.dart';
 import 'reader/services/tts_service.dart';
 import 'reader/services/local_tts_source.dart';
@@ -38,14 +40,45 @@ void main() async {
   // Fire-and-forget: logging works from memory even if this fails.
   unawaited(DebugLogger.instance.ensureInitialized());
   debugPrint('hermes-reader starting; log dir will be under documents/hermes_logs');
-  runApp(const HermesReaderApp());
+  
+  // Initialize notification service
+  final notificationService = NotificationService();
+  await notificationService.init();
+  
+  runApp(HermesReaderApp(notificationService: notificationService));
 }
 
+/// Global navigator key for notification tap handling.
+final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
 class HermesReaderApp extends StatelessWidget {
-  const HermesReaderApp({super.key});
+  final NotificationService notificationService;
+  const HermesReaderApp({super.key, required this.notificationService});
 
   @override
   Widget build(BuildContext context) {
+    // Set up notification tap handler
+    notificationService.onNotificationTap = (payload) {
+      // Payload is "serverId:sessionId" — navigate to session detail
+      if (payload != null && payload.contains(':')) {
+        final parts = payload.split(':');
+        if (parts.length == 2) {
+          final serverId = parts[0];
+          final sessionId = parts[1];
+          // Use a global navigator key to open session detail
+          // Navigate to session monitor and auto-open the session
+          _navigatorKey.currentState?.push(
+            MaterialPageRoute(
+              builder: (_) => SessionMonitorScreen(
+                initialServerId: serverId,
+                initialSessionId: sessionId,
+              ),
+            ),
+          );
+        }
+      }
+    };
+
     return MultiProvider(
       providers: [
         Provider<LibraryService>(
@@ -62,8 +95,14 @@ class HermesReaderApp extends StatelessWidget {
             configStorage: ReaderConfigStorage(),
           ),
         ),
-        ChangeNotifierProvider(create: (_) => SessionProvider()),
         ChangeNotifierProvider(create: (_) => TaskProvider()),
+        ChangeNotifierProvider(
+          create: (_) {
+            final sessionProvider = SessionProvider();
+            sessionProvider.notificationService = notificationService;
+            return sessionProvider;
+          },
+        ),
         ProxyProvider<TaskProvider, void>(
           // Wire the TaskProvider into the SessionProvider so DI authorization
           // requests (0x39) surfaced by the proxy become pending tasks.
@@ -99,6 +138,7 @@ class HermesReaderApp extends StatelessWidget {
         ),
       ],
       child: MaterialApp(
+        navigatorKey: _navigatorKey,
         title: 'hermes-reader',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(

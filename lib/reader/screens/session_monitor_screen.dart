@@ -9,7 +9,9 @@ import '../widgets/voice_command_button.dart';
 
 /// Monitor for Hermes sessions across configured servers.
 class SessionMonitorScreen extends StatefulWidget {
-  const SessionMonitorScreen({super.key});
+  final String? initialServerId;
+  final String? initialSessionId;
+  const SessionMonitorScreen({super.key, this.initialServerId, this.initialSessionId});
 
   @override
   State<SessionMonitorScreen> createState() => _SessionMonitorScreenState();
@@ -18,6 +20,23 @@ class SessionMonitorScreen extends StatefulWidget {
 class _SessionMonitorScreenState extends State<SessionMonitorScreen> {
   int _view = 0; // 0 = 会话, 1 = 事件
   String? _serverFilter;
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-open the session that triggered the notification
+    if (widget.initialServerId != null && widget.initialSessionId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final provider = context.read<SessionProvider>();
+        final snap = provider.currentSessions
+            .where((s) => s.id == widget.initialSessionId)
+            .firstOrNull;
+        if (snap != null && mounted) {
+          _openSnapshot(snap, widget.initialServerId!, provider);
+        }
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

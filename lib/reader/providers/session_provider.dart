@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../services/session_monitor_service.dart';
+import '../services/notification_service.dart';
 import '../services/proxy_client.dart' as reader_proxy;
 import '../services/socket_io_client.dart';
 import '../services/hermes_api_client.dart';
@@ -41,6 +42,7 @@ class SessionProvider extends ChangeNotifier {
   bool _initialized = false;
   reader_proxy.ProxyClient? _proxyClient;
   TaskProvider? _taskProvider;
+  NotificationService? _notificationService;
 
   /// Stream controller for clarify requests that should pop up globally.
   final StreamController<ClarifyRequest> _clarifyController =
@@ -52,6 +54,9 @@ class SessionProvider extends ChangeNotifier {
   List<SessionChange> get recentChanges => List.unmodifiable(_recentChanges);
   bool get isInitialized => _initialized;
   bool get isMonitoring => _monitor?.isRunning ?? false;
+
+  /// Set by the app to receive notification tap events.
+  set notificationService(NotificationService? svc) => _notificationService = svc;
 
   /// The proxy client used for DI/WebSocket tunneling. Exposed so the TTS
   /// service can forward /api/hermes/tts/synthesize through the same proxy
@@ -522,6 +527,10 @@ class SessionProvider extends ChangeNotifier {
   }
 
 void _onChange(SessionChange change) {
+  // Send notification for the change
+  if (_notificationService != null) {
+    _notificationService!.handleChange(change);
+  }
   // 检查是否是停止事件，只保留最新的一个停止会话
   if (change.kind == SessionChangeKind.sessionStopped) {
     // 检查是否已经记录过这个会话的停止
