@@ -448,8 +448,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
-                          // Re-flow pages to the real screen using exact font
-                          // metrics, so each page fits without scrolling.
                           final content = reader.content;
                           if (content != null && constraints.maxHeight > 0) {
                             final fontScale = reader.config.fontScale;
@@ -464,16 +462,19 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                 '$_isFullscreen';
                             if (key != _layoutKey) {
                               _layoutKey = key;
-                              // Defer heavy pagination to avoid ANR.
-                              reader.paginateAsync(
-                                content.text,
-                                style,
-                                constraints.maxWidth - 40,
-                                constraints.maxHeight - 32,
-                                breakOffsets: content.pageBreaks,
-                              ).then((_) {
-                                if (mounted) setState(() {});
-                              });
+                              // Compute pages for the current chapter only.
+                              final chapterIdx = reader.currentChapterIndex;
+                              if (chapterIdx >= 0) {
+                                reader.ensureChapterPages(
+                                  chapterIdx,
+                                  style: style,
+                                  maxWidth: constraints.maxWidth - 40,
+                                  maxHeight: constraints.maxHeight - 32,
+                                  nonFullscreenMaxHeight: constraints.maxHeight - 100,
+                                ).then((_) {
+                                  if (mounted) setState(() {});
+                                });
+                              }
                             }
                           }
                           // Show spinner while pages are being computed.

@@ -2,7 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
+import '../models/chapter_page_info.dart';
 import '../models/reader_config.dart';
+import '../services/paginator_service.dart';
 import '../services/pdf_image_decoder.dart';
 import '../services/narration_progress_service.dart';
 import '../services/paginator_service.dart';
@@ -264,6 +266,178 @@ class ReaderProvider extends ChangeNotifier {
     return idx;
   }
 
+  /// Chapter pagination info, keyed by chapter index.
+  final Map<int, ChapterPageInfo> _chapterPages = {};
+
+  /// Returns the [ChapterPageInfo] for [chapterIndex], or null if not computed.
+  ChapterPageInfo? chapterPageInfo(int chapterIndex) =>
+      _chapterPages[chapterIndex];
+
+  /// Whether the initial 5-page batch has been computed for [chapterIndex].
+  bool hasChapterInitialBatch(int chapterIndex) =>
+      _chapterPages[chapterIndex]?.hasInitialBatch ?? false;
+
+  /// Scans the full book text for chapter boundaries and stores the ranges.
+  ///
+  /// This is called once on book open. The actual per-chapter pagination is
+  /// done lazily via [ensureChapterPages].
+  List<ChapterRange> _chapterRanges = const [];
+
+  /// Scans the book text for chapter boundaries. Called on book open.
+  void _scanChapters(String text) {
+    _chapterRanges = PaginatorService().scanChapters(
+      text,
+      breakOffsets: _content?.pageBreaks,
+    ).map((r) => ChapterRange(startOffset: r.startOffset, endOffset: r.endOffset)).toList();
+  }
+
+  /// Ensures that the initial 5-page batch has been computed for [chapterIndex].
+  ///
+  /// If the chapter has not been paginated yet, computes the first 5 pages
+  /// in a background isolate. Subsequent calls are no-ops until the batch
+  /// is ready.
+  Future<void> ensureChapterPages(
+    int chapterIndex, {
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    required double nonFullscreenMaxHeight,
+  }) async {
+    if (_chapterPages.containsKey(chapterIndex)) return;
+    if (chapterIndex < 0 || chapterIndex >= _chapterRanges.length) return;
+
+    final range = _chapterRanges[chapterIndex];
+    final text = _content?.text;
+    if (text == null) return;
+
+    final info = await PaginatorService.paginateChapterIsolate(
+      text,
+      chapterIndex: chapterIndex,
+      chapterTitle: chapterIndex < _chapters.length
+          ? _chapters[chapterIndex].title
+          : '章节 ${chapterIndex + 1}',
+      chapterStartOffset: range.startOffset,
+      chapterEndOffset: range.endOffset,
+      style: style,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      nonFullscreenMaxHeight: nonFullscreenMaxHeight,
+      initialBatch: 5,
+    );
+
+    _chapterPages[chapterIndex] = info;
+    // Sync the page list for the current mode into _pages so the reader
+    // screen can keep using reader.pages / reader.currentPage.
+    _syncPagesForMode(info, fullscreen: _isFullscreen);
+    notifyListeners();
+  }
+
+  /// Incrementally computes remaining pages for [chapterIndex] after the
+  /// initial 5-page batch has been shown.
+  ///
+  /// Called after the user has finished paging through the initial batch,
+  /// so the UI stays responsive while the rest of the chapter is computed.
+  Future<void> computeRemainingChapterPages(
+    int chapterIndex, {
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    required double nonFullscreenMaxHeight,
+  }) async {
+    final existing = _chapterPages[chapterIndex];
+    if (existing == null || !existing.hasInitialBatch) return;
+    if (chapterIndex < 0 || chapterIndex >= _chapterRanges.length) return;
+
+    final range = _chapterRanges[chapterIndex];
+    final text = _content?.text;
+    if (text == null) return;
+
+    final info = await PaginatorService.paginateChapterIsolate(
+      text,
+      chapterIndex: chapterIndex,
+      chapterTitle: existing.chapterTitle,
+      chapterStartOffset: range.startOffset,
+      chapterEndOffset: range.endOffset,
+      style: style,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      nonFullscreenMaxHeight: nonFullscreenMaxHeight,
+      initialBatch: -1, // compute all remaining pages
+    );
+
+    _chapterPages[chapterIndex] = info;
+    _syncPagesForMode(info, fullscreen: _isFullscreen);
+    notifyListeners();
+  }
+
+  /// Syncs the page list for [info] into [_pages] based on [fullscreen].
+  void _syncPagesForMode(ChapterPageInfo info, {required bool fullscreen}) {
+    final source = fullscreen ? info.fullScreenPages : info.notFullScreenPages;
+    if (source.isEmpty) return;
+    _pages
+      ..clear()
+      ..addAll(source.map((e) => BookPage(
+            index: e.pageIndex,
+            content: pageContentAtOffset(e.startOffset, fullscreen: fullscreen) ?? '',
+            startOffset: e.startOffset,
+          )));
+    if (_pageIndex >= _pages.length) {
+      _pageIndex = _pages.isEmpty ? 0 : _pages.length - 1;
+    }
+  }
+
+  /// Returns the page index within the current chapter for [chapterIndex],
+  /// or -1 when the chapter has not been paginated yet.
+  int pageIndexInChapter(int chapterIndex, {required bool fullscreen}) {
+    final info = _chapterPages[chapterIndex];
+    if (info == null) return -1;
+    final pages = fullscreen ? info.fullScreenPages : info.notFullScreenPages;
+    if (pages.isEmpty) return -1;
+    return pages.last.pageIndex;
+  }
+
+  /// Returns the content for the page starting at [offset].
+  ///
+  /// Used by [_syncPagesForMode] to populate [BookPage.content] from the
+  /// chapter page info. Returns null when the offset is out of range.
+  String? pageContentAtOffset(int offset, {required bool fullscreen}) {
+    final text = _content?.text;
+    if (text == null || offset < 0 || offset >= text.length) return null;
+    final chapterIdx = _chapterRanges.indexWhere(
+        (r) => r.startOffset <= offset && r.endOffset > offset);
+    if (chapterIdx < 0) return null;
+    final info = _chapterPages[chapterIdx];
+    if (info == null) return null;
+    final pages = fullscreen ? info.fullScreenPages : info.notFullScreenPages;
+    if (pages.isEmpty) return null;
+    final idx = pages.indexWhere((p) => p.startOffset == offset);
+    if (idx < 0) return null;
+    final end = (idx + 1 < pages.length)
+        ? pages[idx + 1].startOffset
+        : _chapterRanges[chapterIdx].endOffset;
+    return text.substring(offset, end);
+  }
+
+  /// Returns the total number of pages in [chapterIndex] for the given mode.
+  int chapterPageCount(int chapterIndex, {required bool fullscreen}) {
+    final info = _chapterPages[chapterIndex];
+    if (info == null) return 0;
+    final pages = fullscreen ? info.fullScreenPages : info.notFullScreenPages;
+    return pages.length;
+  }
+
+  /// Returns the character offset of the first page in [chapterIndex].
+  int chapterStartOffset(int chapterIndex) {
+    if (chapterIndex < 0 || chapterIndex >= _chapterRanges.length) return 0;
+    return _chapterRanges[chapterIndex].startOffset;
+  }
+
+  /// Returns the character offset of the last page in [chapterIndex].
+  int chapterEndOffset(int chapterIndex) {
+    if (chapterIndex < 0 || chapterIndex >= _chapterRanges.length) return 0;
+    return _chapterRanges[chapterIndex].endOffset;
+  }
+
   /// Images pulled from the source, indexed by the [imageMarker] tokens embedded
   /// in each [BookPage.content].
   List<PdfImage> get images => _content?.images ?? const [];
@@ -279,6 +453,14 @@ class ReaderProvider extends ChangeNotifier {
 
   void toggleFullscreen() {
     _isFullscreen = !_isFullscreen;
+    // Re-sync pages for the current chapter in the new mode
+    final chapterIdx = currentChapterIndex;
+    if (chapterIdx >= 0) {
+      final info = _chapterPages[chapterIdx];
+      if (info != null) {
+        _syncPagesForMode(info, fullscreen: _isFullscreen);
+      }
+    }
     notifyListeners();
   }
 
@@ -330,7 +512,9 @@ class ReaderProvider extends ChangeNotifier {
     _content = content;
     _error = null;
     _chapters = const [];
+    _chapterPages.clear();
     _rebuildPages();
+    _scanChapters(content.text);
 
     // Try to restore saved reading position
     final saved = await _progressService.load(book.id);
@@ -384,6 +568,17 @@ class ReaderProvider extends ChangeNotifier {
   /// Jumps to the page where the chapter at [index] begins.
   void goToChapter(int index) {
     if (index < 0 || index >= _chapters.length) return;
+    final info = _chapterPages[index];
+    if (info != null && info.fullScreenPages.isNotEmpty) {
+      // Use chapter page info for precise navigation
+      final pages = _isFullscreen ? info.fullScreenPages : info.notFullScreenPages;
+      if (pages.isNotEmpty) {
+        final targetOffset = pages.first.startOffset;
+        final pageIdx = _pageIndexForOffset(targetOffset);
+        goToPage(pageIdx);
+        return;
+      }
+    }
     goToPage(_pageIndexForOffset(_chapters[index].offset));
   }
 

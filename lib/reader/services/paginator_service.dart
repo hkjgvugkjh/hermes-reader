@@ -2,6 +2,7 @@ import 'dart:isolate';
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
+import '../models/chapter_page_info.dart';
 import '../models/reader_config.dart';
 
 /// Splits plain text into readable pages.
@@ -127,6 +128,219 @@ class PaginatorService {
         .where((s) => s.trim().isNotEmpty)
         .toList();
     return _flowBlocks(paragraphs, style, maxWidth, maxHeight);
+  }
+
+  /// Paginates a single chapter (identified by [chapterIndex]) starting from
+  /// [chapterStartOffset] in the full book [text].
+  ///
+  /// Computes pages in both fullscreen ([maxHeight]) and non-fullscreen
+  /// ([maxHeight] reduced by app-bar + footer) modes simultaneously. The
+  /// result is stored as [ChapterPageInfo] with parallel page lists.
+  ///
+  /// [chapterEndOffset] is the start of the next chapter (or text.length for
+  /// the last chapter). Only the range [chapterStartOffset, chapterEndOffset)
+  /// is paginated.
+  ///
+  /// [initialBatch] controls how many pages are computed on the first call.
+  /// Pass [initialBatch] = 5 for the opening batch; subsequent incremental
+  /// calls should pass [initialBatch] = -1 to compute all remaining pages.
+  ChapterPageInfo paginateChapter(
+    String text, {
+    required int chapterIndex,
+    required String chapterTitle,
+    required int chapterStartOffset,
+    required int chapterEndOffset,
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    required double nonFullscreenMaxHeight,
+    int initialBatch = 5,
+  }) {
+    final chapterLen = chapterEndOffset - chapterStartOffset;
+    if (chapterLen <= 0 || text.isEmpty) {
+      return ChapterPageInfo(
+        chapterIndex: chapterIndex,
+        chapterTitle: chapterTitle,
+        startOffset: chapterStartOffset,
+        fullScreenPages: const [],
+        notFullScreenPages: const [],
+      );
+    }
+
+    final chapterText = text.substring(chapterStartOffset, chapterEndOffset);
+    final fullPages = _flowBlocksWithOffsets(
+      _splitParagraphs(chapterText).map((p) => p.text).where((s) => s.trim().isNotEmpty).toList(),
+      style,
+      maxWidth,
+      maxHeight,
+      chapterStartOffset,
+      initialBatch: initialBatch,
+    );
+    final nonFullPages = _flowBlocksWithOffsets(
+      _splitParagraphs(chapterText).map((p) => p.text).where((s) => s.trim().isNotEmpty).toList(),
+      style,
+      maxWidth,
+      nonFullscreenMaxHeight,
+      chapterStartOffset,
+      initialBatch: initialBatch,
+    );
+
+    return ChapterPageInfo(
+      chapterIndex: chapterIndex,
+      chapterTitle: chapterTitle,
+      startOffset: chapterStartOffset,
+      fullScreenPages: fullPages,
+      notFullScreenPages: nonFullPages,
+    );
+  }
+
+  /// Runs [paginateChapter] in a background isolate.
+  static Future<ChapterPageInfo> paginateChapterIsolate(
+    String text, {
+    required int chapterIndex,
+    required String chapterTitle,
+    required int chapterStartOffset,
+    required int chapterEndOffset,
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    required double nonFullscreenMaxHeight,
+    int initialBatch = 5,
+  }) async {
+    final params = _ChapterIsolateParams(
+      text: text,
+      chapterIndex: chapterIndex,
+      chapterTitle: chapterTitle,
+      chapterStartOffset: chapterStartOffset,
+      chapterEndOffset: chapterEndOffset,
+      fontSize: style.fontSize ?? 17,
+      heightFactor: style.height ?? 1.0,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      nonFullscreenMaxHeight: nonFullscreenMaxHeight,
+      initialBatch: initialBatch,
+    );
+    return Isolate.run(() => _paginateChapterInIsolate(params));
+  }
+
+  /// Full-book chapter scan: returns each chapter's offset range.
+  ///
+  /// Uses [breakOffsets] when available (PDF page boundaries, EPUB chapters).
+  /// When no break offsets exist, falls back to a simple heading scan on the
+  /// text. The returned list always starts with offset 0 and each entry is
+  /// strictly ascending.
+  List<ChapterRange> scanChapters(String text, {List<int>? breakOffsets}) {
+    final ranges = <ChapterRange>[];
+    if (text.isEmpty) return ranges;
+
+    if (breakOffsets != null && breakOffsets.isNotEmpty) {
+      final sorted = breakOffsets.where((o) => o > 0 && o < text.length).toList()..sort();
+      var prev = 0;
+      for (final off in sorted) {
+        if (off > prev) {
+          ranges.add(ChapterRange(startOffset: prev, endOffset: off));
+        }
+        prev = off;
+      }
+      if (prev < text.length) {
+        ranges.add(ChapterRange(startOffset: prev, endOffset: text.length));
+      }
+      return ranges;
+    }
+
+    // Fallback: scan for markdown-style headings (lines starting with #)
+    final lines = text.split('\n');
+    var offset = 0;
+    var chapterStart = 0;
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final trimmed = line.trimLeft();
+      if (trimmed.startsWith('#') && i > 0) {
+        ranges.add(ChapterRange(startOffset: chapterStart, endOffset: offset));
+        chapterStart = offset;
+      }
+      offset += line.length + 1; // +1 for the \n
+    }
+    if (chapterStart < text.length) {
+      ranges.add(ChapterRange(startOffset: chapterStart, endOffset: text.length));
+    }
+    return ranges;
+  }
+
+  /// Flows paragraphs into pages that never exceed [maxHeight], returning
+  /// each page's offset relative to the full book text.
+  ///
+  /// When [initialBatch] > 0, only the first [initialBatch] pages are
+  /// computed and the remaining text is ignored (for fast first-open).
+  List<PageEntry> _flowBlocksWithOffsets(
+    List<String> blocks,
+    TextStyle style,
+    double maxWidth,
+    double maxHeight,
+    int baseOffset, {
+    int initialBatch = -1,
+  }) {
+    final pages = <PageEntry>[];
+    final buffer = StringBuffer();
+    var startOffset = 0;
+    var usedHeight = 0.0;
+
+    final painter = TextPainter(
+      textDirection: TextDirection.ltr,
+      maxLines: null,
+    );
+
+    void flush() {
+      final content = buffer.toString();
+      if (content.trim().isNotEmpty) {
+        pages.add(PageEntry(
+          pageIndex: pages.length,
+          startOffset: baseOffset + startOffset,
+        ));
+        startOffset += content.length;
+      }
+      buffer.clear();
+      usedHeight = 0.0;
+    }
+
+    double measureHeight(String text) {
+      painter.text = TextSpan(text: text, style: style);
+      painter.layout(maxWidth: maxWidth);
+      return painter.height;
+    }
+
+    for (final para in blocks) {
+      if (initialBatch > 0 && pages.length >= initialBatch) break;
+
+      final paraHeight = measureHeight(para);
+
+      if (usedHeight + paraHeight <= maxHeight && usedHeight > 0) {
+        buffer.write(para);
+        usedHeight += paraHeight;
+        continue;
+      }
+
+      if (usedHeight > 0) flush();
+
+      if (paraHeight <= maxHeight) {
+        buffer.write(para);
+        usedHeight = paraHeight;
+        continue;
+      }
+
+      final limit = (maxHeight * 0.95);
+      for (final chunk in _splitLongParagraphByHeight(para, style, maxWidth, limit)) {
+        if (initialBatch > 0 && pages.length >= initialBatch) break;
+        final chunkHeight = measureHeight(chunk);
+        if (usedHeight > 0 && usedHeight + chunkHeight > maxHeight) {
+          flush();
+        }
+        buffer.write(chunk);
+        usedHeight += chunkHeight;
+      }
+    }
+    flush();
+    return pages;
   }
 
   /// Runs [paginateWithLayout] in a background isolate.
@@ -498,6 +712,17 @@ class _Paragraph {
   const _Paragraph(this.text);
 }
 
+/// Chapter offset range within the full book text.
+class ChapterRange {
+  final int startOffset;
+  final int endOffset;
+
+  const ChapterRange({
+    required this.startOffset,
+    required this.endOffset,
+  });
+}
+
 extension _SplitMapped on String {
   /// Splits on [pattern] while keeping the delimiters attached to each piece.
   List<String> splitMapped(Pattern pattern) {
@@ -552,5 +777,54 @@ List<BookPage> _paginateInIsolate(_IsolateParams params) {
     maxWidth: params.maxWidth,
     maxHeight: params.maxHeight,
     breakOffsets: params.breakOffsets,
+  );
+}
+
+/// Parameters for isolate-based chapter pagination.
+class _ChapterIsolateParams {
+  final String text;
+  final int chapterIndex;
+  final String chapterTitle;
+  final int chapterStartOffset;
+  final int chapterEndOffset;
+  final double fontSize;
+  final double heightFactor;
+  final double maxWidth;
+  final double maxHeight;
+  final double nonFullscreenMaxHeight;
+  final int initialBatch;
+
+  const _ChapterIsolateParams({
+    required this.text,
+    required this.chapterIndex,
+    required this.chapterTitle,
+    required this.chapterStartOffset,
+    required this.chapterEndOffset,
+    required this.fontSize,
+    required this.heightFactor,
+    required this.maxWidth,
+    required this.maxHeight,
+    required this.nonFullscreenMaxHeight,
+    required this.initialBatch,
+  });
+}
+
+/// Top-level function that runs inside the worker isolate.
+ChapterPageInfo _paginateChapterInIsolate(_ChapterIsolateParams params) {
+  final style = TextStyle(
+    fontSize: params.fontSize,
+    height: params.heightFactor,
+  );
+  return PaginatorService().paginateChapter(
+    params.text,
+    chapterIndex: params.chapterIndex,
+    chapterTitle: params.chapterTitle,
+    chapterStartOffset: params.chapterStartOffset,
+    chapterEndOffset: params.chapterEndOffset,
+    style: style,
+    maxWidth: params.maxWidth,
+    maxHeight: params.maxHeight,
+    nonFullscreenMaxHeight: params.nonFullscreenMaxHeight,
+    initialBatch: params.initialBatch,
   );
 }
