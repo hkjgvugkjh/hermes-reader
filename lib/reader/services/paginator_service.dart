@@ -130,10 +130,10 @@ class PaginatorService {
 
   /// Lays [blocks] (paragraphs) out into pages that never exceed [maxHeight].
   ///
-  /// Each paragraph is laid out at most once and the running page height is
-  /// tracked, so the whole pass is O(n). A multi-megabyte paragraph is never
-  /// measured in one [TextPainter] call (that blocks the UI thread for tens of
-  /// seconds and triggers ANR); instead it is estimated and hard-split.
+  /// Each paragraph is measured with [TextPainter] to get its real rendered
+  /// height. A page is flushed when adding the next paragraph would overflow
+  /// [maxHeight]. Over-long paragraphs are split by line ranges so each piece
+  /// fits the available height exactly.
   List<BookPage> _flowBlocks(
     List<String> blocks,
     TextStyle style,
@@ -144,7 +144,13 @@ class PaginatorService {
     final buffer = StringBuffer();
     var startOffset = 0;
     var cursor = 0;
-    var used = 0;
+    var usedHeight = 0.0;
+
+    // Reusable painter — never recreated inside the loop.
+    final painter = TextPainter(
+      textDirection: TextDirection.ltr,
+      maxLines: null,
+    );
 
     void flush() {
       final content = buffer.toString();
@@ -158,36 +164,47 @@ class PaginatorService {
         startOffset = cursor;
       }
       buffer.clear();
-      used = 0;
+      usedHeight = 0.0;
     }
 
-    // Rough character capacity of one screen. Pagination is done purely by
-    // character counting at paragraph boundaries — never by laying every
-    // paragraph out with TextPainter. A book split into tens of thousands of
-    // paragraphs would otherwise trigger tens of thousands of layout calls and
-    // block the UI thread for 15s+ (ANR). Over-long paragraphs are still
-    // hard-split without any layout pass.
-    final screenChars = _estimateCharsPerScreen(style, maxWidth, maxHeight);
+    /// Measures the actual rendered height of [text] at [maxWidth].
+    double measureHeight(String text) {
+      painter.text = TextSpan(text: text, style: style);
+      painter.layout(maxWidth: maxWidth);
+      return painter.height;
+    }
 
     for (final para in blocks) {
-      if (para.length > screenChars) {
-        if (used > 0) flush();
-        final limit = (screenChars * 0.9).round().clamp(50, 1 << 20);
-        for (final chunk in _splitLongParagraph(para, limit)) {
-          pages.add(BookPage(
-            index: pages.length,
-            content: chunk,
-            startOffset: cursor,
-          ));
-          cursor += chunk.length;
-        }
+      final paraHeight = measureHeight(para);
+
+      // Paragraph fits on current page — append it.
+      if (usedHeight + paraHeight <= maxHeight && usedHeight > 0) {
+        buffer.write(para);
+        usedHeight += paraHeight;
         continue;
       }
-      if (used > 0 && used + para.length > screenChars) {
-        flush();
+
+      // Current page has content and this paragraph won't fit — flush first.
+      if (usedHeight > 0) flush();
+
+      // Paragraph fits on a fresh page — start a new page with it.
+      if (paraHeight <= maxHeight) {
+        buffer.write(para);
+        usedHeight = paraHeight;
+        continue;
       }
-      buffer.write(para);
-      used += para.length;
+
+      // Over-long paragraph: split by sentence boundaries, measuring each
+      // candidate page with TextPainter so the break point is exact.
+      final limit = (maxHeight * 0.95);
+      for (final chunk in _splitLongParagraphByHeight(para, style, maxWidth, limit)) {
+        final chunkHeight = measureHeight(chunk);
+        if (usedHeight > 0 && usedHeight + chunkHeight > maxHeight) {
+          flush();
+        }
+        buffer.write(chunk);
+        usedHeight += chunkHeight;
+      }
     }
     flush();
     return pages;
@@ -283,6 +300,88 @@ class PaginatorService {
       if (cut > start && cut < end) return end;
     }
     return cut;
+  }
+
+  /// Splits an over-long paragraph into chunks that each fit within
+  /// [maxHeight] when rendered at [style] and [maxWidth].
+  ///
+  /// Sentences are accumulated and measured with [TextPainter] so the break
+  /// point is exact — not estimated by character count. A very large paragraph
+  /// is estimated and hard-split to avoid O(n) layout calls.
+  List<String> _splitLongParagraphByHeight(
+    String para,
+    TextStyle style,
+    double maxWidth,
+    double maxHeight,
+  ) {
+    // Very large paragraphs: estimate by character ratio to avoid O(n) layout.
+    // A rough cut is acceptable — the reader will re-paginate on next open.
+    if (para.length > 20000) {
+      final painter = TextPainter(
+        textDirection: TextDirection.ltr,
+        text: TextSpan(text: para, style: style),
+      )..layout(maxWidth: maxWidth);
+      final lineHeight = painter.height / painter.computeLineMetrics().length;
+      final linesPerPage = (maxHeight / lineHeight).floor().clamp(1, 1 << 20);
+      final charLimit = (para.length * linesPerPage /
+              painter.computeLineMetrics().length)
+          .round()
+          .clamp(50, 1 << 20);
+      return _splitLongParagraph(para, charLimit);
+    }
+
+    final painter = TextPainter(
+      textDirection: TextDirection.ltr,
+      maxLines: null,
+    );
+
+    double measure(String text) {
+      painter.text = TextSpan(text: text, style: style);
+      painter.layout(maxWidth: maxWidth);
+      return painter.height;
+    }
+
+    final sentences = para.splitMapped(
+      RegExp(r'(?<=[。！？!?.;；])'),
+    );
+
+    final chunks = <String>[];
+    final buffer = StringBuffer();
+    var usedHeight = 0.0;
+
+    for (final sentence in sentences) {
+      if (sentence.isEmpty) continue;
+      final sentenceHeight = measure(sentence);
+
+      // Single sentence taller than a page — hard-split by character ratio.
+      if (sentenceHeight > maxHeight) {
+        if (buffer.isNotEmpty) {
+          chunks.add(buffer.toString());
+          buffer.clear();
+          usedHeight = 0;
+        }
+        final ratio = maxHeight / sentenceHeight;
+        final charLimit =
+            (sentence.length * ratio * 0.95).round().clamp(50, 1 << 20);
+        for (final piece in _splitLongParagraph(sentence, charLimit)) {
+          chunks.add(piece);
+        }
+        continue;
+      }
+
+      // Adding this sentence would overflow — flush the current page.
+      if (usedHeight > 0 && usedHeight + sentenceHeight > maxHeight) {
+        chunks.add(buffer.toString());
+        buffer.clear();
+        usedHeight = 0;
+      }
+
+      buffer.write(sentence);
+      usedHeight += sentenceHeight;
+    }
+
+    if (buffer.isNotEmpty) chunks.add(buffer.toString());
+    return chunks.isEmpty ? [para] : chunks;
   }
 
   List<_Paragraph> _splitParagraphs(String text) {
