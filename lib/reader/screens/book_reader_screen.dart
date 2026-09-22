@@ -33,6 +33,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// Full-screen reading mode (no app bar, no footer, just text).
   bool _isFullscreen = false;
 
+  final ScrollController _scrollController = ScrollController();
+  double? _pendingChapterScrollFraction;
+  int? _pendingChapterPageIndex;
+
   TtsService? _tts;
 
   /// How far the engine has got into the current page, in characters.
@@ -180,6 +184,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     if (_narrating) {
       // Leaving mid-sentence should still remember where we were.
       _saveNarration();
@@ -702,6 +707,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         : null,
                     onTap: () {
                       reader.goToChapter(i);
+                      _pendingChapterScrollFraction = 0.1;
+                      _pendingChapterPageIndex = reader.pageIndex;
                       Navigator.pop(ctx);
                     },
                   );
@@ -871,38 +878,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       ),
     );
   }
-}
 
-class _FallbackBanner extends StatelessWidget {
-  const _FallbackBanner({required this.reason});
-
-  final String reason;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.amber.withValues(alpha: 0.18),
-      child: Row(
-        children: [
-          const Icon(Icons.info_outline, size: 16, color: Colors.amber),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              '已降级为本机语音（$reason）',
-              style: const TextStyle(fontSize: 12),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-}
-
-  /// Renders the current page's text with any inline images interleaved. The
-  /// body scrolls so a picture taller than the screen stays reachable.
   Widget _buildPageBody(
     BuildContext context,
     ReaderProvider reader, {
@@ -977,13 +953,29 @@ class _FallbackBanner extends StatelessWidget {
       );
     }
 
-    return SingleChildScrollView(
+    final scrollView = SingleChildScrollView(
+      controller: _scrollController,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: widgets,
       ),
     );
+
+    // Scroll to the chapter heading after jumping from the TOC.
+    final targetPageIndex = _pendingChapterPageIndex;
+    final targetFraction = _pendingChapterScrollFraction;
+    if (targetPageIndex != null && reader.pageIndex == targetPageIndex && targetFraction != null) {
+      _pendingChapterPageIndex = null;
+      _pendingChapterScrollFraction = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        final maxScroll = _scrollController.position.maxScrollExtent;
+        _scrollController.jumpTo(maxScroll * targetFraction);
+      });
+    }
+
+    return scrollView;
   }
 
   Widget _buildImage(PdfImage img, double maxWidth) {
@@ -1006,6 +998,38 @@ class _FallbackBanner extends StatelessWidget {
     );
   }
 
+}
+
+class _FallbackBanner extends StatelessWidget {
+  const _FallbackBanner({required this.reason});
+
+  final String reason;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: Colors.amber.withValues(alpha: 0.18),
+      child: Row(
+        children: [
+          const Icon(Icons.info_outline, size: 16, color: Colors.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '已降级为本机语音（$reason）',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+}
+
+  /// Renders the current page's text with any inline images interleaved. The
+  /// body scrolls so a picture taller than the screen stays reachable.
 class _ReaderFooter extends StatelessWidget {
   const _ReaderFooter({
     required this.pageIndex,
