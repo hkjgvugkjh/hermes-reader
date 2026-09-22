@@ -95,7 +95,7 @@ class _SessionMonitorScreenState extends State<SessionMonitorScreen> {
               Expanded(
                 child: _view == 0
                     ? _buildSessions(sessions, provider)
-                    : _buildChanges(changes),
+                    : _buildChanges(changes, provider),
               ),
             ],
           ),
@@ -122,13 +122,21 @@ class _SessionMonitorScreenState extends State<SessionMonitorScreen> {
     );
   }
 
-  Widget _buildChanges(List<SessionChange> changes) {
+  Widget _buildChanges(List<SessionChange> changes, SessionProvider provider) {
     if (changes.isEmpty) {
       return const Center(child: Text('暂无事件'));
     }
     return ListView.builder(
       itemCount: changes.length,
-      itemBuilder: (_, i) => _ChangeTile(change: changes[i]),
+      itemBuilder: (_, i) => _ChangeTile(
+        change: changes[i],
+        onTap: () {
+          final snap = changes[i].after ?? changes[i].before;
+          if (snap != null) {
+            _openSnapshot(snap, changes[i].serverId, provider);
+          }
+        },
+      ),
     );
   }
 
@@ -352,8 +360,9 @@ class _SessionSnapshotSheetState extends State<_SessionSnapshotSheet> {
 
 class _ChangeTile extends StatelessWidget {
   final SessionChange change;
+  final VoidCallback? onTap;
 
-  const _ChangeTile({required this.change});
+  const _ChangeTile({required this.change, this.onTap});
 
   String _kindLabel(SessionChangeKind kind) {
     switch (kind) {
@@ -375,13 +384,17 @@ class _ChangeTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final snap = change.after ?? change.before;
-    return SwitchListTile(
-      value: change.after != null,
-      onChanged: null,
+    return ListTile(
       title: Text('${_kindLabel(change.kind)} · ${snap?.title ?? change.serverId}'),
       subtitle: Text(
         '服务器: ${change.serverId}  •  ${_fmtTime(change.detectedAt)}',
       ),
+      trailing: Icon(
+        change.after != null ? Icons.check_circle : Icons.circle_outlined,
+        color: change.after != null ? Colors.green : Colors.grey,
+        size: 16,
+      ),
+      onTap: onTap,
     );
   }
 }
