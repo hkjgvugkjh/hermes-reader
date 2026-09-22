@@ -48,8 +48,7 @@ flutter:
   generate: true
   uses-material-design: true
   assets:
-    - assets/tts/
-    # sanoTTS voice weights (en_us_e12nano.q8.front.bin / .decoder.bin) are
-    # dropped here at release time and are git-ignored; the dir is kept so the
-    # build stays valid when the blobs are absent.
-    - assets/sano/
+    # TTS model assets excluded for slim debug builds (~84MB savings).
+    # Re-enable for release builds with real TTS/sano models.
+    # - assets/tts/
+    # - assets/sano/

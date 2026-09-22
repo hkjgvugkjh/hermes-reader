@@ -449,18 +449,20 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           final content = reader.content;
+                          // Compute max heights for pagination (available text area).
+                          // These are used both for pagination and for constraining
+                          // the rendered content to prevent scrolling.
+                          final safePadding = MediaQuery.of(context).padding;
+                          final fullscreenMaxHeight = constraints.maxHeight -
+                              32 - safePadding.top - safePadding.bottom;
+                          final nonFullscreenMaxHeight = constraints.maxHeight -
+                              100 - safePadding.top - safePadding.bottom;
                           if (content != null && constraints.maxHeight > 0) {
                             final fontScale = reader.config.fontScale;
                             final style = TextStyle(
                               fontSize: 17 * fontScale,
                               height: reader.config.lineHeightFactor,
                             );
-                            // Account for SafeArea padding (status bar + nav bar)
-                            final safePadding = MediaQuery.of(context).padding;
-                            final fullscreenMaxHeight = constraints.maxHeight -
-                                32 - safePadding.top - safePadding.bottom;
-                            final nonFullscreenMaxHeight = constraints.maxHeight -
-                                100 - safePadding.top - safePadding.bottom;
                             final key =
                                 '${content.text.length}:$fontScale:'
                                 '${constraints.maxWidth.toInt()}:'
@@ -538,7 +540,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                             },
                             child: SafeArea(
                               child: _buildPageBody(context, reader,
-                                  onSelection: _onPageSelection),
+                                  onSelection: _onPageSelection,
+                                  contentMaxHeight: _isFullscreen
+                                      ? fullscreenMaxHeight
+                                      : nonFullscreenMaxHeight),
                             ),
                           );
                         },
@@ -924,6 +929,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     BuildContext context,
     ReaderProvider reader, {
     void Function(int start, int end, String text)? onSelection,
+    double? contentMaxHeight,
   }) {
     final page = reader.currentPage;
     if (page == null) return const SizedBox.shrink();
@@ -1014,13 +1020,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       }
     }
 
-    final scrollView = SingleChildScrollView(
-      controller: _scrollController,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: widgets,
-      ),
+    // Use a fixed-height Column instead of SingleChildScrollView to prevent
+    // scrolling. The pagination algorithm ensures content fits within
+    // contentMaxHeight. Fall back to scrollable only for chapter jumps.
+    final column = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: widgets,
     );
 
     // Scroll to the chapter heading after jumping from the TOC.
@@ -1036,7 +1041,22 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       });
     }
 
-    return scrollView;
+    if (contentMaxHeight != null) {
+      // Constrain content to the available height for the current mode.
+      // SizedBox forces the height; ClipRect clips any overflow as a safety net.
+      // In fullscreen mode contentMaxHeight = fullscreenMaxHeight;
+      // in non-fullscreen mode it = nonFullscreenMaxHeight.
+      return SizedBox(
+        height: contentMaxHeight,
+        child: ClipRect(
+          child: column,
+        ),
+      );
+    }
+
+    // Fallback when no valid max height is available (page null or constraints
+    // not yet measured). Just return the column without constraint.
+    return column;
   }
 
   Widget _buildImage(PdfImage img, double maxWidth) {

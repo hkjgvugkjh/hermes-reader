@@ -73,6 +73,8 @@
 - 2026-09-22: 修复字体变化页数不变（updateConfig 检测 fontScale 变化时调用 ensureChapterPages(force: true)，使用正确的 lineHeightFactor）
 - 2026-09-22: 修复章节列表不自动滚动（添加 _chapterListScrollController，showModalBottomSheet 后 animateTo 当前章节）
 - 2026-09-22: 修复分页超出可见区域（分页高度从硬编码改为 reader.config.lineHeightFactor，渲染和分页使用相同值）
+- 2026-09-22: 修复章节流动不正确（分页时考虑 SafeArea padding，使用 MediaQuery.of(context).padding 获取状态栏+导航栏高度）
+- 2026-09-22: 修复章节列表不自动滚动（scrollController 改为方法内部变量，在 builder 内部使用 addPostFrameCallback 滚动到当前章节）
 
 #### 分页信息结构
 

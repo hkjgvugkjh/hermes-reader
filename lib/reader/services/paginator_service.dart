@@ -288,6 +288,11 @@ class PaginatorService {
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       maxLines: null,
+      textAlign: TextAlign.justify,
+      textHeightBehavior: TextHeightBehavior(
+        applyHeightToFirstAscent: true,
+        applyHeightToLastDescent: true,
+      ),
     );
 
     void flush() {
@@ -393,6 +398,11 @@ class PaginatorService {
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       maxLines: null,
+      textAlign: TextAlign.justify,
+      textHeightBehavior: TextHeightBehavior(
+        applyHeightToFirstAscent: true,
+        applyHeightToLastDescent: true,
+      ),
     );
 
     void flush() {
@@ -576,6 +586,11 @@ class PaginatorService {
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       maxLines: null,
+      textAlign: TextAlign.justify,
+      textHeightBehavior: TextHeightBehavior(
+        applyHeightToFirstAscent: true,
+        applyHeightToLastDescent: true,
+      ),
     );
 
     double measure(String text) {
