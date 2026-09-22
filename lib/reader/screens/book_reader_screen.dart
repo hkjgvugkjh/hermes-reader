@@ -455,6 +455,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               fontSize: 17 * fontScale,
                               height: reader.config.lineHeightFactor,
                             );
+                            // Account for SafeArea padding (status bar + nav bar)
+                            final safePadding = MediaQuery.of(context).padding;
+                            final fullscreenMaxHeight = constraints.maxHeight -
+                                32 - safePadding.top - safePadding.bottom;
+                            final nonFullscreenMaxHeight = constraints.maxHeight -
+                                100 - safePadding.top - safePadding.bottom;
                             final key =
                                 '${content.text.length}:$fontScale:'
                                 '${constraints.maxWidth.toInt()}:'
@@ -469,8 +475,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                   chapterIdx,
                                   style: style,
                                   maxWidth: constraints.maxWidth - 40,
-                                  maxHeight: constraints.maxHeight - 32,
-                                  nonFullscreenMaxHeight: constraints.maxHeight - 100,
+                                  maxHeight: fullscreenMaxHeight,
+                                  nonFullscreenMaxHeight: nonFullscreenMaxHeight,
                                 ).then((_) {
                                   if (mounted) setState(() {});
                                 });
@@ -687,77 +693,73 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   /// Shows the detected table of contents as a bottom sheet; tapping an entry
   /// jumps to that chapter's first page.
-  final ScrollController _chapterListScrollController = ScrollController();
-
   void _showChapterList(ReaderProvider reader) {
     final current = reader.currentChapterIndex;
+    final scrollController = ScrollController();
     showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text('选择章节',
-                  style: Theme.of(context).textTheme.titleMedium),
-            ),
-            Expanded(
-              child: ListView.builder(
-                controller: _chapterListScrollController,
-                itemCount: reader.chapters.length,
-                itemBuilder: (_, i) {
-                  final ch = reader.chapters[i];
-                  final active = i == current;
-                  return ListTile(
-                    dense: true,
-                    title: Text(
-                      ch.title,
-                      style: TextStyle(
-                        fontWeight: active ? FontWeight.bold : FontWeight.normal,
-                        color: active
-                            ? Theme.of(context).colorScheme.primary
-                            : null,
-                      ),
-                    ),
-                    trailing: active
-                        ? Icon(Icons.bookmark,
-                            size: 16,
-                            color: Theme.of(context).colorScheme.primary)
-                        : null,
-                    onTap: () {
-                      reader.goToChapter(i);
-                      _pendingChapterScrollFraction = 0.1;
-                      _pendingChapterPageIndex = reader.pageIndex;
-                      Navigator.pop(ctx);
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    ).then((_) {
-      // Scroll to current chapter after the sheet is dismissed
-      if (current >= 0 && _chapterListScrollController.hasClients) {
-        // This won't work after dismissal — the controller is disposed
-      }
-    });
-    // Scroll to current chapter after the bottom sheet is shown
-    if (current >= 0) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_chapterListScrollController.hasClients) {
-          final itemExtent = 56.0; // approximate ListTile height
-          final targetOffset = (current * itemExtent)
-              .clamp(0.0, _chapterListScrollController.position.maxScrollExtent);
-          _chapterListScrollController.animateTo(
-            targetOffset,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
+      builder: (ctx) {
+        // Scroll to current chapter after the sheet is rendered
+        if (current >= 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (scrollController.hasClients) {
+              final itemExtent = 56.0;
+              final targetOffset = (current * itemExtent)
+                  .clamp(0.0, scrollController.position.maxScrollExtent);
+              scrollController.animateTo(
+                targetOffset,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOut,
+              );
+            }
+          });
         }
-      });
-    }
+        return SafeArea(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text('选择章节',
+                    style: Theme.of(context).textTheme.titleMedium),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  controller: scrollController,
+                  itemCount: reader.chapters.length,
+                  itemBuilder: (_, i) {
+                    final ch = reader.chapters[i];
+                    final active = i == current;
+                    return ListTile(
+                      dense: true,
+                      title: Text(
+                        ch.title,
+                        style: TextStyle(
+                          fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                          color: active
+                              ? Theme.of(context).colorScheme.primary
+                              : null,
+                        ),
+                      ),
+                      trailing: active
+                          ? Icon(Icons.bookmark,
+                              size: 16,
+                              color: Theme.of(context).colorScheme.primary)
+                          : null,
+                      onTap: () {
+                        reader.goToChapter(i);
+                        _pendingChapterScrollFraction = 0.1;
+                        _pendingChapterPageIndex = reader.pageIndex;
+                        Navigator.pop(ctx);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   /// Shows a page-number jump dialog with a slider and a numeric field.

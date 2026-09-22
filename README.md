@@ -70,6 +70,9 @@
 
 - 2026-09-22: 修复字体变化不更新分页（清除 `_chapterPages` 缓存而非 `_pages`，LayoutBuilder 自动重算）
 - 2026-09-22: 修复通知点击无响应（NotificationService 添加 `onDidReceiveNotificationResponse` 回调，navigatorKey 全局导航，SessionMonitorScreen 支持 initialServerId/initialSessionId 自动打开会话）
+- 2026-09-22: 修复字体变化页数不变（updateConfig 检测 fontScale 变化时调用 ensureChapterPages(force: true)，使用正确的 lineHeightFactor）
+- 2026-09-22: 修复章节列表不自动滚动（添加 _chapterListScrollController，showModalBottomSheet 后 animateTo 当前章节）
+- 2026-09-22: 修复分页超出可见区域（分页高度从硬编码改为 reader.config.lineHeightFactor，渲染和分页使用相同值）
 
 #### 分页信息结构
 
