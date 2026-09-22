@@ -223,12 +223,20 @@ class ReaderProvider extends ChangeNotifier {
   final ReaderConfigStorage? _configStorage;
 
   void updateConfig(ReaderConfig config) {
+    final fontChanged = config.fontScale != _config.fontScale;
     _config = config;
     // Re-paginate only when the page size actually changed — re-paginating on
     // an unrelated setting would jump the reader back to page 0.
     if (_content != null && config.charsPerPage != _lastPageChars) {
       _rebuildPages();
       savePosition();
+    }
+    // Font size change invalidates all chapter page caches — the pages were
+    // computed for the old font metrics. Clear caches; LayoutBuilder will
+    // re-trigger with the correct constraints and new font on next build.
+    if (fontChanged && _content != null) {
+      _chapterPages.clear();
+      _rebuildPages();
     }
     notifyListeners();
     _configStorage?.save(config);
@@ -302,8 +310,9 @@ class ReaderProvider extends ChangeNotifier {
     required double maxWidth,
     required double maxHeight,
     required double nonFullscreenMaxHeight,
+    bool force = false,
   }) async {
-    if (_chapterPages.containsKey(chapterIndex)) return;
+    if (_chapterPages.containsKey(chapterIndex) && !force) return;
     if (chapterIndex < 0 || chapterIndex >= _chapterRanges.length) return;
 
     final range = _chapterRanges[chapterIndex];
