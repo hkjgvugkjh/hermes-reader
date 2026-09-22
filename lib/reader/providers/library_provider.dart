@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 
 import '../models/book.dart';
 import '../models/reader_config.dart';
@@ -424,6 +425,52 @@ class ReaderProvider extends ChangeNotifier {
   void goToPage(int index) {
     if (_pages.isEmpty) return;
     _pageIndex = index.clamp(0, _pages.length - 1);
+    notifyListeners();
+    savePosition();
+  }
+
+  /// Whether the initial layout pass is still running. The reader shows a
+  /// spinner while this is true so the UI never appears frozen.
+  bool _paginating = false;
+  bool get isPaginating => _paginating;
+
+  /// Runs [paginateWithLayout] off the UI thread and applies the result.
+  ///
+  /// [PaginatorService.paginateWithLayout] can take several seconds for large
+  /// books because it lays out every paragraph with TextPainter. Running it
+  /// synchronously in the build method blocks the main thread and triggers
+  /// ANR — this method defers it to the next microtask and shows a progress
+  /// indicator until the pages are ready.
+  Future<void> paginateAsync(
+    String text,
+    TextStyle style,
+    double maxWidth,
+    double maxHeight, {
+    List<int>? breakOffsets,
+  }) async {
+    _paginating = true;
+    notifyListeners();
+
+    // Defer to next frame so the spinner paints before the heavy work starts.
+    await WidgetsBinding.instance.endOfFrame;
+
+    final pages = await Future(() {
+      return PaginatorService().paginateWithLayout(
+        text,
+        style: style,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+        breakOffsets: breakOffsets,
+      );
+    });
+
+    _pages
+      ..clear()
+      ..addAll(pages);
+    if (_pageIndex >= _pages.length) {
+      _pageIndex = _pages.isEmpty ? 0 : _pages.length - 1;
+    }
+    _paginating = false;
     notifyListeners();
     savePosition();
   }

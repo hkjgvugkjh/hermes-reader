@@ -464,20 +464,23 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                 '$_isFullscreen';
                             if (key != _layoutKey) {
                               _layoutKey = key;
-                              final pages = PaginatorService()
-                                  .paginateWithLayout(
+                              // Defer heavy pagination to avoid ANR.
+                              reader.paginateAsync(
                                 content.text,
-                                style: style,
-                                maxWidth: constraints.maxWidth - 40,
-                                maxHeight: constraints.maxHeight - 32,
+                                style,
+                                constraints.maxWidth - 40,
+                                constraints.maxHeight - 32,
                                 breakOffsets: content.pageBreaks,
-                              );
-                              // Apply after this frame to avoid notify-during-build.
-                              // Preserve the current page offset so the reader
-                              // stays on the same text after a fullscreen toggle.
-                              WidgetsBinding.instance.addPostFrameCallback(
-                                  (_) => reader.setPages(pages, preserveOffset: true));
+                              ).then((_) {
+                                if (mounted) setState(() {});
+                              });
                             }
+                          }
+                          // Show spinner while pages are being computed.
+                          if (reader.isPaginating || reader.pages.isEmpty) {
+                            return const Center(
+                              child: CircularProgressIndicator(),
+                            );
                           }
                           return GestureDetector(
                             behavior: HitTestBehavior.opaque,
