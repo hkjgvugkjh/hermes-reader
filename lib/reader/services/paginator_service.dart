@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../models/book.dart';
 import '../models/chapter_page_info.dart';
 import '../models/reader_config.dart';
+import 'text_break_utils.dart';
 
 /// Splits plain text into readable pages.
 ///
@@ -117,8 +118,9 @@ class PaginatorService {
       final blocks = <String>[];
       final bounds = [0, ...usableBreaks, text.length];
       for (var i = 0; i < bounds.length - 1; i++) {
-        final block = text.substring(bounds[i], bounds[i + 1]).trim();
-        if (block.isNotEmpty) blocks.add(block);
+        // Preserve leading indentation; only drop a leading line break.
+        final block = _preserveIndent(text.substring(bounds[i], bounds[i + 1]));
+        if (block.trimRight().isNotEmpty) blocks.add(block);
       }
       return _flowBlocks(blocks, style, maxWidth, maxHeight);
     }
@@ -168,16 +170,20 @@ class PaginatorService {
     }
 
     final chapterText = text.substring(chapterStartOffset, chapterEndOffset);
-    final fullPages = _flowBlocksWithOffsets(
-      _splitParagraphs(chapterText).map((p) => p.text).where((s) => s.trim().isNotEmpty).toList(),
+    // Line-level flow: each page is filled with as many rendered lines as
+    // actually fit, so paragraphs continue across page breaks instead of
+    // being pushed wholesale to the next page (which left half-empty pages
+    // whenever short paragraphs clustered together).
+    final fullPages = _paginateChapterTextByLines(
+      chapterText,
       style,
       maxWidth,
       maxHeight,
       chapterStartOffset,
       initialBatch: initialBatch,
     );
-    final nonFullPages = _flowBlocksWithOffsets(
-      _splitParagraphs(chapterText).map((p) => p.text).where((s) => s.trim().isNotEmpty).toList(),
+    final nonFullPages = _paginateChapterTextByLines(
+      chapterText,
       style,
       maxWidth,
       nonFullscreenMaxHeight,
@@ -191,6 +197,214 @@ class PaginatorService {
       startOffset: chapterStartOffset,
       fullScreenPages: fullPages,
       notFullScreenPages: nonFullPages,
+    );
+  }
+
+  /// Precise, measurement-based pagination of one chapter's text.
+  ///
+  /// Each page is filled by laying out the text with [TextPainter] at the exact
+  /// rendering width and binary-searching the largest character offset whose
+  /// measured height does not exceed [maxHeight]. The next character would
+  /// overflow, so every page is filled to the pixel with no wasted space — and
+  /// because the same [TextPainter] configuration is used for measuring and for
+  /// rendering, a page never overflows or underfills regardless of CJK metrics,
+  /// justification, or line-height quirks. Paragraphs (and even individual
+  /// sentences, thanks to [_splitSentences]) continue across the break instead
+  /// of jumping wholesale.
+  ///
+  /// Each page's [PageEntry.startOffset] is the page's first character in the
+  /// full book text; the page content is the source range up to the next page's
+  /// start, so characters are never dropped or duplicated.
+  /// Whether [code] is whitespace that can lead a paragraph and therefore must
+  /// stay attached to the text that follows it: ASCII space/tab, non-breaking
+  /// space, and the ideographic (full-width) space U+3000 used for Chinese
+  /// first-line indentation.
+  bool _isPageWs(int code) =>
+      code == 0x20 || code == 0x09 || code == 0x00A0 || code == 0x3000;
+
+  List<PageEntry> _paginateChapterTextByLines(
+    String chapterText,
+    TextStyle style,
+    double maxWidth,
+    double maxHeight,
+    int baseOffset, {
+    int initialBatch = -1,
+  }) {
+    final pages = <PageEntry>[];
+    if (chapterText.isEmpty || maxHeight <= 0 || maxWidth <= 0) return pages;
+    // justify 布局会折叠行首空白（含段首缩进 U+3000），先把它们替换成不
+    // 折叠的等长占位 U+3164，保证测量与渲染一致且缩进宽度参与排版。
+    // 替换 1:1 等长，本函数返回的 offsets 不受影响。
+    chapterText = uncollapseLeadingIndents(chapterText);
+    final painter = TextPainter(
+      textDirection: TextDirection.ltr,
+      maxLines: null,
+      textAlign: TextAlign.justify,
+      textHeightBehavior: TextHeightBehavior(
+        applyHeightToFirstAscent: true,
+        applyHeightToLastDescent: true,
+      ),
+    );
+
+    final fs = style.fontSize ?? 17.0;
+    final lh = style.height ?? 1.0;
+    // Rough per-page character capacity, used only to seed the binary search.
+    final estChars =
+        ((maxHeight / (fs * lh)) * (maxWidth / fs) * 1.5).round().clamp(1, 1 << 20);
+    final n = chapterText.length;
+
+    var pos = 0;
+    while (pos < n) {
+      if (initialBatch > 0 && pages.length >= initialBatch) break;
+
+      var lo = pos;
+      var hi = (pos + estChars).clamp(pos, n);
+      while (lo < hi) {
+        final mid = (lo + hi + 1) ~/ 2;
+        painter.text = TextSpan(
+          text: chapterText.substring(pos, mid),
+          style: style,
+        );
+        painter.layout(maxWidth: maxWidth);
+        if (painter.height <= maxHeight) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      // Absorb any under-estimate from estChars (a few chars at most).
+      while (lo < n) {
+        painter.text = TextSpan(
+          text: chapterText.substring(pos, lo + 1),
+          style: style,
+        );
+        painter.layout(maxWidth: maxWidth);
+        if (painter.height <= maxHeight) {
+          lo++;
+        } else {
+          break;
+        }
+      }
+      // Fill every page to the brim. The binary search above already found the
+      // largest offset whose rendered height fits [maxHeight]; we keep [lo] at
+      // exactly that point and let the next page continue from the cut — so a
+      // paragraph is split at its tail (mid-sentence if necessary) instead of
+      // being pushed wholesale to the next page, which used to leave the current
+      // page half-empty. The leading-char guard below still ensures the *next*
+      // page never opens with a lone closing quote/bracket.
+      if (lo <= pos) lo = pos + 1; // guarantee forward progress
+
+      // Keep a paragraph's leading whitespace (indent, e.g. the two full-width
+      // spaces "　　" before a Chinese paragraph) attached to the text that
+      // follows it. If the cut landed right before a non-space character whose
+      // immediate predecessor is whitespace, pulling the whitespace run back
+      // into the *next* page stops it from being orphaned as invisible trailing
+      // space at the end of this page (which would make the next page open
+      // without its indent). We never cross a newline, so we don't yank a
+      // paragraph break back with it. The previous page ([pos, lo)) is a strict
+      // subset of what we already measured to fit, so it still fits.
+      if (lo < n &&
+          !_isPageWs(chapterText.codeUnitAt(lo)) &&
+          _isPageWs(chapterText.codeUnitAt(lo - 1))) {
+        var k = lo;
+        while (k > pos &&
+            _isPageWs(chapterText.codeUnitAt(k - 1)) &&
+            chapterText.codeUnitAt(k - 1) != 0x0A &&
+            chapterText.codeUnitAt(k - 1) != 0x0D) {
+          k--;
+        }
+        if (k > pos) lo = k;
+      }
+
+      // A page must never BEGIN with a character forbidden at line start
+      // (closing quotes/brackets). If the cut landed right before one — e.g.
+      // “…什么吧？” — absorb it into this page so the next page doesn't open
+      // with a lone ”. Kept only when the extra character(s) still fit.
+      if (lo < n && kLineStartForbidden.contains(chapterText[lo])) {
+        var end = lo;
+        while (end < n && kLineStartForbidden.contains(chapterText[end])) {
+          end++;
+        }
+        painter.text = TextSpan(
+          text: chapterText.substring(pos, end),
+          style: style,
+        );
+        painter.layout(maxWidth: maxWidth);
+        if (painter.height <= maxHeight) lo = end;
+      }
+
+      pages.add(PageEntry(
+        pageIndex: pages.length,
+        startOffset: baseOffset + pos,
+      ));
+      pos = lo;
+      // Drop the paragraph separator that now sits at the page boundary so
+      // the next page starts with real text instead of a blank first line.
+      while (pos < n &&
+          (chapterText[pos] == '\n' || chapterText[pos] == '\r')) {
+        pos++;
+      }
+    }
+    return pages;
+  }
+
+  /// Exact, measurement-based pagination of the whole book.
+  ///
+  /// The book is split into chapters ([chapters], usually from [scanChapters])
+  /// and each chapter is flowed with [_paginateChapterTextByLines], so every
+  /// page is filled to the pixel and each chapter starts on a fresh page. This
+  /// is the single source of truth used by the reader surface — it replaces the
+  /// old character-count heuristic that left half-empty pages.
+  List<PageEntry> paginateBookExact(
+    String text, {
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    List<ChapterRange>? chapters,
+    int initialBatch = -1,
+  }) {
+    final ranges = (chapters != null && chapters.isNotEmpty)
+        ? chapters
+        : [ChapterRange(startOffset: 0, endOffset: text.length)];
+    // When only an opening batch is requested, compute one extra page boundary
+    // so the batch's last page still knows where it ends — otherwise it would
+    // swallow the entire rest of the chapter.
+    final batch = initialBatch > 0 ? initialBatch + 1 : -1;
+    final out = <PageEntry>[];
+    for (final r in ranges) {
+      final chapterText = text.substring(r.startOffset, r.endOffset);
+      out.addAll(_paginateChapterTextByLines(
+        chapterText,
+        style,
+        maxWidth,
+        maxHeight,
+        r.startOffset,
+        initialBatch: batch,
+      ));
+    }
+    return out;
+  }
+
+  /// Runs [paginateBookExact] in a background isolate.
+  static Future<List<PageEntry>> paginateBookExactIsolate(
+    String text, {
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    List<ChapterRange>? chapters,
+    int initialBatch = -1,
+  }) async {
+    // Deliberately NOT Isolate.run: TextPainter is a UI API and throws
+    // "UI actions are only available on root isolate" when used from a
+    // background isolate. Pagination therefore runs on the root isolate and is
+    // kept cheap by paginating one chapter's opening batch at a time.
+    return PaginatorService().paginateBookExact(
+      text,
+      style: style,
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+      chapters: chapters,
+      initialBatch: initialBatch,
     );
   }
 
@@ -267,87 +481,6 @@ class PaginatorService {
     return ranges;
   }
 
-  /// Flows paragraphs into pages that never exceed [maxHeight], returning
-  /// each page's offset relative to the full book text.
-  ///
-  /// When [initialBatch] > 0, only the first [initialBatch] pages are
-  /// computed and the remaining text is ignored (for fast first-open).
-  List<PageEntry> _flowBlocksWithOffsets(
-    List<String> blocks,
-    TextStyle style,
-    double maxWidth,
-    double maxHeight,
-    int baseOffset, {
-    int initialBatch = -1,
-  }) {
-    final pages = <PageEntry>[];
-    final buffer = StringBuffer();
-    var startOffset = 0;
-    var usedHeight = 0.0;
-
-    final painter = TextPainter(
-      textDirection: TextDirection.ltr,
-      maxLines: null,
-      textAlign: TextAlign.justify,
-      textHeightBehavior: TextHeightBehavior(
-        applyHeightToFirstAscent: true,
-        applyHeightToLastDescent: true,
-      ),
-    );
-
-    void flush() {
-      final content = buffer.toString();
-      if (content.trim().isNotEmpty) {
-        pages.add(PageEntry(
-          pageIndex: pages.length,
-          startOffset: baseOffset + startOffset,
-        ));
-        startOffset += content.length;
-      }
-      buffer.clear();
-      usedHeight = 0.0;
-    }
-
-    double measureHeight(String text) {
-      painter.text = TextSpan(text: text, style: style);
-      painter.layout(maxWidth: maxWidth);
-      return painter.height;
-    }
-
-    for (final para in blocks) {
-      if (initialBatch > 0 && pages.length >= initialBatch) break;
-
-      final paraHeight = measureHeight(para);
-
-      if (usedHeight + paraHeight <= maxHeight && usedHeight > 0) {
-        buffer.write(para);
-        usedHeight += paraHeight;
-        continue;
-      }
-
-      if (usedHeight > 0) flush();
-
-      if (paraHeight <= maxHeight) {
-        buffer.write(para);
-        usedHeight = paraHeight;
-        continue;
-      }
-
-      final limit = (maxHeight * 0.95);
-      for (final chunk in _splitLongParagraphByHeight(para, style, maxWidth, limit)) {
-        if (initialBatch > 0 && pages.length >= initialBatch) break;
-        final chunkHeight = measureHeight(chunk);
-        if (usedHeight > 0 && usedHeight + chunkHeight > maxHeight) {
-          flush();
-        }
-        buffer.write(chunk);
-        usedHeight += chunkHeight;
-      }
-    }
-    flush();
-    return pages;
-  }
-
   /// Runs [paginateWithLayout] in a background isolate.
   ///
   /// [paginateWithLayout] calls [TextPainter.layout] for every paragraph —
@@ -373,15 +506,19 @@ class PaginatorService {
       maxHeight: maxHeight,
       breakOffsets: breakOffsets,
     );
-    return Isolate.run(() => _paginateInIsolate(params));
+    // TextPainter is UI-only: it cannot run in a background isolate
+    // ("UI actions are only available on root isolate"), so paginate here.
+    return _paginateInIsolate(params);
   }
 
   /// Lays [blocks] (paragraphs) out into pages that never exceed [maxHeight].
   ///
-  /// Each paragraph is measured with [TextPainter] to get its real rendered
-  /// height. A page is flushed when adding the next paragraph would overflow
-  /// [maxHeight]. Over-long paragraphs are split by line ranges so each piece
-  /// fits the available height exactly.
+  /// Each block is measured with [TextPainter] to get its real rendered height.
+  /// A block that fits the space left on the current page is appended whole; a
+  /// block that does not fit is cut from its tail (at a sentence boundary) so the
+  /// current page is filled, and the remainder plus following blocks continue on
+  /// the next page. Over-long blocks are split by height so each piece fits the
+  /// available height exactly.
   List<BookPage> _flowBlocks(
     List<String> blocks,
     TextStyle style,
@@ -406,14 +543,20 @@ class PaginatorService {
     );
 
     void flush() {
-      final content = buffer.toString();
-      if (content.trim().isNotEmpty) {
+      final raw = buffer.toString();
+      // Trim only *trailing* whitespace for display, so a page never closes with
+      // a blank line (the buffer ends in the last paragraph's trailing \n+).
+      // Leading spaces (paragraph indentation) and inter-paragraph blank lines
+      // are preserved. The source offset still advances by the raw length so
+      // page startOffsets stay continuous across pages.
+      final content = raw.replaceAll(RegExp(r'[ \t\r\n]+$'), '');
+      if (content.isNotEmpty) {
         pages.add(BookPage(
           index: pages.length,
           content: content,
           startOffset: startOffset,
         ));
-        cursor = startOffset + content.length;
+        cursor = startOffset + raw.length;
         startOffset = cursor;
       }
       buffer.clear();
@@ -422,57 +565,54 @@ class PaginatorService {
 
     /// Measures the actual rendered height of [text] at [maxWidth].
     double measureHeight(String text) {
-      painter.text = TextSpan(text: text, style: style);
+      painter.text = TextSpan(text: uncollapseLeadingIndents(text), style: style);
       painter.layout(maxWidth: maxWidth);
       return painter.height;
     }
 
-    for (final para in blocks) {
-      final paraHeight = measureHeight(para);
+    for (final block in blocks) {
+      var text = block;
+      // A single logical block may span several pages: keep cutting from its tail
+      // until the whole block has been laid out.
+      while (text.isNotEmpty) {
+        final h = measureHeight(text);
 
-      // Paragraph fits on current page — append it.
-      if (usedHeight + paraHeight <= maxHeight && usedHeight > 0) {
-        buffer.write(para);
-        usedHeight += paraHeight;
-        continue;
-      }
-
-      // Current page has content and this paragraph won't fit — flush first.
-      if (usedHeight > 0) flush();
-
-      // Paragraph fits on a fresh page — start a new page with it.
-      if (paraHeight <= maxHeight) {
-        buffer.write(para);
-        usedHeight = paraHeight;
-        continue;
-      }
-
-      // Over-long paragraph: split by sentence boundaries, measuring each
-      // candidate page with TextPainter so the break point is exact.
-      final limit = (maxHeight * 0.95);
-      for (final chunk in _splitLongParagraphByHeight(para, style, maxWidth, limit)) {
-        final chunkHeight = measureHeight(chunk);
-        if (usedHeight > 0 && usedHeight + chunkHeight > maxHeight) {
-          flush();
+        // Whole remaining text fits in the space left on the current page (or the
+        // page is still empty) — append it as-is.
+        if (usedHeight + h <= maxHeight) {
+          buffer.write(text);
+          usedHeight += h;
+          text = '';
+          continue;
         }
-        buffer.write(chunk);
-        usedHeight += chunkHeight;
+
+        // Page is empty but this single block is taller than a full page on its
+        // own — split it by height and stream its pieces in.
+        if (usedHeight == 0) {
+          for (final chunk in _splitLongParagraphByHeight(text, style, maxWidth, maxHeight)) {
+            final ch = measureHeight(chunk);
+            if (usedHeight > 0 && usedHeight + ch > maxHeight) flush();
+            buffer.write(chunk);
+            usedHeight += ch;
+          }
+          text = '';
+          continue;
+        }
+
+        // Block won't fit in the remaining space: keep as much of it as fits on
+        // the current page (cut from the tail at a sentence boundary) and push the
+        // rest to the next page — so the page is filled instead of left half-empty.
+        final availH = maxHeight - usedHeight;
+        final cut = _splitLongParagraphByHeight(text, style, maxWidth, availH * 0.95);
+        final prefix = cut.first;
+        buffer.write(prefix);
+        usedHeight += measureHeight(prefix);
+        flush();
+        text = cut.length > 1 ? cut.sublist(1).join('') : '';
       }
     }
     flush();
     return pages;
-  }
-
-  /// Rough character capacity of one screen, used to avoid laying out huge
-  /// paragraphs all at once. A slightly over-estimated bound is fine: paragraphs
-  /// judged longer are split, which is always correct.
-  static int _estimateCharsPerScreen(
-      TextStyle style, double maxWidth, double maxHeight) {
-    final fs = style.fontSize ?? 17.0;
-    final lh = style.height ?? 1.0;
-    final perLine = (maxWidth / fs).ceil().clamp(1, 1 << 20);
-    final lines = (maxHeight / (fs * lh)).ceil().clamp(1, 1 << 20);
-    return perLine * lines;
   }
 
   /// Strips markdown noise so narration does not read out punctuation.
@@ -492,6 +632,16 @@ class PaginatorService {
         .trim();
   }
 
+  /// Drops only leading line breaks so a page never opens with a blank line,
+  /// while preserving intentional leading spaces (paragraph indentation).
+  String _preserveIndent(String s) {
+    var i = 0;
+    while (i < s.length && (s.codeUnitAt(i) == 0x0A || s.codeUnitAt(i) == 0x0D)) {
+      i++;
+    }
+    return i == 0 ? s : s.substring(i);
+  }
+
   /// Keeps only strictly ascending offsets inside the text. Returns null when
   /// there is nothing usable, so the caller falls back to length-based paging.
   List<int>? _sanitizeBreaks(List<int>? offsets, int length) {
@@ -507,6 +657,16 @@ class PaginatorService {
   }
 
   /// One page per logical block; oversized blocks are cut by sentence.
+  ///
+  /// Each break offset forces a new page, so chapter headings (when chapter
+  /// offsets are passed as breaks) always land at the top of a page — the
+  /// reader's jump-to-chapter then shows the heading at the screen top instead
+  /// of burying it mid-page.
+  ///
+  /// Page start offsets are tracked with a running cursor (not by re-searching
+  /// the chunk inside the block, which is buggy when a trimmed chunk appears
+  /// more than once), so [BookPage.startOffset] always matches the real
+  /// character position in the source text.
   List<BookPage> _paginateByBreaks(
       String text, List<int> breaks, int limit) {
     final pages = <BookPage>[];
@@ -517,25 +677,37 @@ class PaginatorService {
       final end = bounds[i + 1];
       if (end <= start) continue;
 
-      final block = text.substring(start, end).trim();
-      if (block.isEmpty) continue;
+      // Keep leading spaces (paragraph indentation) but drop leading line
+      // breaks so a page never opens with a blank line.
+      final block = text.substring(start, end);
+      final kept = _preserveIndent(block);
+      if (kept.trimRight().isEmpty) continue;
 
-      if (block.length <= limit) {
-        pages.add(BookPage(index: pages.length, content: block, startOffset: start));
+      if (kept.length <= limit) {
+        pages.add(BookPage(
+            index: pages.length,
+            content: kept.replaceAll(RegExp(r'[ \t\r\n]+$'), ''),
+            startOffset: start));
         continue;
       }
 
+      // Stream-cut the block so each page's startOffset is exact. Leading
+      // indentation is preserved in the content, so startOffset points at the
+      // real character that the page begins with.
+      var cursor = start;
       for (final chunk in _splitLongParagraph(block, limit)) {
-        final trimmed = chunk.trim();
-        if (trimmed.isEmpty) continue;
+        final kc = _preserveIndent(chunk);
+        if (kc.trimRight().isEmpty) {
+          cursor += chunk.length;
+          continue;
+        }
         pages.add(BookPage(
-          index: pages.length,
-          content: trimmed,
-          startOffset: start + block.indexOf(trimmed),
-        ));
+            index: pages.length,
+            content: kc.replaceAll(RegExp(r'[ \t\r\n]+$'), ''),
+            startOffset: cursor));
+        cursor += chunk.length;
       }
     }
-
     return pages;
   }
 
@@ -594,14 +766,12 @@ class PaginatorService {
     );
 
     double measure(String text) {
-      painter.text = TextSpan(text: text, style: style);
+      painter.text = TextSpan(text: uncollapseLeadingIndents(text), style: style);
       painter.layout(maxWidth: maxWidth);
       return painter.height;
     }
 
-    final sentences = para.splitMapped(
-      RegExp(r'(?<=[。！？!?.;；])'),
-    );
+    final sentences = _splitSentences(para);
 
     final chunks = <String>[];
     final buffer = StringBuffer();
@@ -642,13 +812,42 @@ class PaginatorService {
     return chunks.isEmpty ? [para] : chunks;
   }
 
+  /// Splits [text] into sentence-like pieces on CJK/Latin terminal
+  /// punctuation ([。！？!?.;；]), but keeps any closing quote that immediately
+  /// follows the punctuation attached to the current piece.
+  ///
+  /// Without this, a closing quote right after a terminal mark — e.g. the "
+  /// after ？ in “……？” — would be treated as the start of the *next* piece.
+  /// The paginator could then place ？ at the bottom of one page and the
+  /// orphaned " at the top of the next, visually breaking the quotation.
+  List<String> _splitSentences(String text) {
+    if (text.isEmpty) return const [];
+    final result = <String>[];
+    var lastEnd = 0;
+    const terminators = '。！？!?.;；';
+    const closingQuotes = {'"', '”', '’', '\'', '』', '」'};
+    for (var i = 0; i < text.length; i++) {
+      if (!terminators.contains(text[i])) continue;
+      var end = i + 1;
+      while (end < text.length && closingQuotes.contains(text[end])) {
+        end++;
+      }
+      if (end > lastEnd) {
+        result.add(text.substring(lastEnd, end));
+        lastEnd = end;
+      }
+    }
+    if (lastEnd < text.length) result.add(text.substring(lastEnd));
+    return result.isEmpty ? [text] : result;
+  }
+
   List<_Paragraph> _splitParagraphs(String text) {
     final result = <_Paragraph>[];
     final regex = RegExp(r'[^\n]*(?:\n+|$)');
     for (final match in regex.allMatches(text)) {
       final raw = match.group(0);
       if (raw == null || raw.isEmpty) continue;
-      result.add(_Paragraph(raw));
+      result.add(_Paragraph(raw, match.start));
     }
     return result;
   }
@@ -681,9 +880,7 @@ class PaginatorService {
     // Smaller paragraphs: cut on sentence boundaries where possible to keep
     // reading natural, falling back to an index stream so cost stays O(n).
     final buffer = StringBuffer();
-    final sentences = para.splitMapped(
-      RegExp(r'(?<=[。！？!?.;；])'),
-    );
+    final sentences = _splitSentences(para);
 
     for (final sentence in sentences) {
       if (sentence.isEmpty) continue;
@@ -724,7 +921,10 @@ class ReaderConfigDefault {
 
 class _Paragraph {
   final String text;
-  const _Paragraph(this.text);
+
+  /// Offset of this paragraph within the text it was split from.
+  final int offset;
+  const _Paragraph(this.text, [this.offset = 0]);
 }
 
 /// Chapter offset range within the full book text.
@@ -736,23 +936,6 @@ class ChapterRange {
     required this.startOffset,
     required this.endOffset,
   });
-}
-
-extension _SplitMapped on String {
-  /// Splits on [pattern] while keeping the delimiters attached to each piece.
-  List<String> splitMapped(Pattern pattern) {
-    final parts = <String>[];
-    var lastEnd = 0;
-    for (final match in pattern.allMatches(this)) {
-      final end = match.end;
-      if (end > lastEnd) {
-        parts.add(substring(lastEnd, end));
-        lastEnd = end;
-      }
-    }
-    if (lastEnd < length) parts.add(substring(lastEnd));
-    return parts;
-  }
 }
 
 /// Convenience: paginate a [BookContent] using a [ReaderConfig].

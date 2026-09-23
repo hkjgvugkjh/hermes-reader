@@ -53,6 +53,11 @@ enum CommentSyncMode {
 class ReaderConfig {
   // ---- privacy / safety limits -------------------------------------------
 
+  /// Base font size (logical pixels) for reader body text. Multiplied by
+  /// [fontScale] to obtain the rendered size. Shared by the paginator
+  /// (measurement) and the renderer (drawing) so the two stay in sync.
+  static const double baseFontSize = 17.0;
+
   /// Only files under this directory (relative to the server workspace) may be
   /// read. Everything else is refused before any request leaves the device.
   static const String libraryRoot = 'library';

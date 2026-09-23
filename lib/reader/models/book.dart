@@ -131,6 +131,13 @@ class ReadingProgress {
   final String bookId;
   final int pageIndex;
 
+  /// Character offset of the page start in the full book text.
+  ///
+  /// Page counts change when the viewport-based page size changes, so the
+  /// offset (not the index) is the authoritative resume point. 0 for records
+  /// written before this field existed.
+  final int offset;
+
   /// 0.0 - 1.0, derived from page position.
   final double percent;
   final DateTime updatedAt;
@@ -138,6 +145,7 @@ class ReadingProgress {
   const ReadingProgress({
     required this.bookId,
     required this.pageIndex,
+    this.offset = 0,
     required this.percent,
     required this.updatedAt,
   });
@@ -145,6 +153,7 @@ class ReadingProgress {
   Map<String, dynamic> toJson() => {
         'bookId': bookId,
         'pageIndex': pageIndex,
+        'offset': offset,
         'percent': percent,
         'updatedAt': updatedAt.toIso8601String(),
       };
@@ -153,6 +162,7 @@ class ReadingProgress {
       ReadingProgress(
         bookId: json['bookId'] as String,
         pageIndex: json['pageIndex'] as int? ?? 0,
+        offset: json['offset'] as int? ?? 0,
         percent: (json['percent'] as num? ?? 0.0).toDouble(),
         updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
             DateTime.now(),

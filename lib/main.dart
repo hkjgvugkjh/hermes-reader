@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
@@ -298,6 +299,12 @@ class _StartupScreenState extends State<StartupScreen> {
     super.initState();
     FlutterError.onError = (details) {
       debugPrint('Flutter error: ${details.exception}');
+      // Log the widget chain too, otherwise layout reports such as "RenderFlex
+      // overflowed" cannot be located from logcat alone.
+      if (kDebugMode) {
+        final text = details.toString();
+        debugPrint(text.length > 2000 ? '${text.substring(0, 2000)}…' : text);
+      }
     };
     _checkConfig();
   }

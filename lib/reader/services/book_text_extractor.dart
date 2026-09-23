@@ -168,7 +168,7 @@ class DefaultBookTextExtractor implements BookTextExtractor {
     return cleaned
         .replaceAll(RegExp(r'\n{3,}'), '\n\n')
         .split('\n')
-        .map((line) => line.trim())
+        .map((line) => line.trimRight()) // 保留行首空格，仅去行尾空白
         .join('\n')
         .trim();
   }

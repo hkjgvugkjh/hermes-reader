@@ -1,5 +1,74 @@
 # ChangeLog
 
+## 2026-09-23（已修复 · 待真机验证）
+- **修复阅读页始终显示“没有可显示的内容”**。
+  根因（连锁两处）：① `book_reader_screen` 用 `page == null` 作为是否渲染正文的
+  开关，而 `page` 为空恰恰是分页完成前的状态 —— 触发分页的 `LayoutBuilder` 就在
+  这个分支里，于是永远不会被构建、`syncViewportChars()` 永不执行、`_pages` 永远是
+  空的，形成死锁；改为按 `content` 判空，`page == null` 时走 `isPaginating ||
+  pages.isEmpty` 的加载态分支。② `openBook()` 不再调用 `_rebuildPages()` 播种
+  字符级兜底页，一旦 ① 发生就没有任何内容可显示；现在 `openBook()` 恢复调用
+  `_rebuildPages()` 先给出兜底页，视口精确分页随后覆盖。
+- **修复分页行高单位错误**：传给 `syncViewportChars()` 的 `TextStyle.height` 被写成
+  绝对像素值 `fontSize × lineHeightFactor`（17×1.6≈27），而 `TextStyle.height` 是
+  **字号倍数**，实际行高被放大到 462dp/行 —— 每屏只能塞进 1 个字符。改为传入
+  `reader.config.lineHeightFactor`，与正文渲染 `_buildPageBody` 的测量样式一致。
+- 健壮性：`_paginateChapter()` 提前返回时清空 `_viewportSig`，避免 debounce 把后续
+  布局帧全部吞掉而永久停在加载态；新增 `_canPaginate()`，`nextPage()/previousPage()`
+  /`goToChapter()` 在无布局信息时不再“假装还有下一页”（此前 `while(nextPage())`
+  会死循环），`goToChapter()` 退化为在字符级页面中跳转。
+- **扩大阅读区域并修复 4.3px 布局溢出**：正文高度原来按
+  `constraints.maxHeight - 100 - safePadding` 计算 —— SafeArea 已把系统 insets
+  去掉一次，这里再减 100px + insets 属于重复扣除，每页浪费约 65dp 空白；改为
+  `constraints.maxHeight - 16 - insets`（16px 为取整余量）。残余的偶发
+  "RenderFlex overflowed by 4.3 pixels"（TextPainter 测量与真实渲染的固定微差，
+  位于 Huawei P10 的满页上）已被外层 `ClipRect` 裁剪、肉眼不可见，属 debug 日志
+  噪音。
+- `main.dart` 的 `FlutterError.onError` 现在同时输出 widget 链
+  （`details.toString()`，仅 debug 模式），便于从 logcat 直接定位布局问题。
+- 目录检测 `_detectChapters()` 不再挂到 `addPostFrameCallback`（未泵帧的场景永远不
+  执行，单元测试看不到目录），改为开卷即发起（本身跑在后台 Isolate，不阻塞 UI）。
+- 真机验证（Huawei PCT-AL10，USB 直连）：打开 7.7MB《元尊》→ 正文正常显示、
+  翻页 11/29→14/29 正常、章节完整分页 29 页约 300ms、无卡顿。
+- 回归：`flutter test` 83/84 通过（唯一失败项 `chapter_detector_test` 的“少于两个
+  标题”用例在改动前 HEAD 上同样失败，与本次无关）。
+
+## 2026-09-22（已实现 · 真机验证）
+- **修复阅读页正文底部溢出（BOTTOM OVERFLOWED BY 672/523 PIXELS）**。
+  根因：渲染层把正文 `Column` 套进 `SizedBox(height: contentMaxHeight)`（非全屏
+  ≈ 454dp / 全屏 ≈ 630dp）依赖分页结果“每页恰好一屏”，但实际 `_pages` 来自
+  `openBook → _rebuildPages()` 的**估算法分页**（按固定 `charsPerPage=700` 字/页
+  切页，无布局测量），每页 ~700-800 字 ≈ 41 行 × 27.2dp ≈ 1120dp ≫ 454dp →
+  溢出 672px（数字精确吻合）。本应按真实屏幕分页的 `ensureChapterPages →
+  paginateChapterIsolate` 从未生效：`_chapterRanges` 由 `scanChapters` 生成、
+  fallback 只识别 markdown `#` 标题 → 普通 txt 全书只有 1 个 range，而章节检测
+  `_chapters`（识别“第X章”）是另一套异步系统，`ensureChapterPages(chapterIdx)`
+  因 `chapterIndex >= _chapterRanges.length` 直接 return。此前 3 次“修复溢出”
+  的尝试（TextPainter 高度匹配等）都改在了这条死路上。
+- **改用视口自适应估算分页**：阅读页 `LayoutBuilder` 内按真实可视高度换算
+  每页字数（`perLine = maxWidth/fontSize`、`lines = availH/(fontSize×lineHeight)`、
+  `chars = perLine × lines × 0.85` 安全系数），调用新增的
+  `ReaderProvider.syncViewportChars(chars)` 重切页并以字符偏移对齐保持阅读位置。
+  因 CJK 字形至多 1em 宽，实际行数只会更少，每页永不超过固定高度的正文区。
+  `charsPerPage` 用户设置作为上限。`ReadingProgress` 新增 `offset` 字段，进度按
+  字符偏移恢复，页大小变化不再错位。`updateConfig` 字号变化分支删除了硬编码
+  尺寸的 `ensureChapterPages` 死代码调用。
+- **重新设计章节跳转定位逻辑**：此前章节标题被当作普通段落累积进当前页，
+  标题落在页内中下部，渲染层固定高度 `SizedBox+ClipRect` 无滚动 → 跳转后标题
+  不在可见范围（“多移动了两行”）；原设计的 `_pendingChapterScrollFraction=0.1`
+  页内滚动因无 `ScrollView`、`_scrollController` 无 clients 从不执行（死代码）。
+  现把章节标题偏移作为 `breakOffsets` 传给分页器，`_paginateByBreaks` 重写为
+  流式 `cursor` 累积偏移（修掉原 `block.indexOf(trimmed)` 在重复子串时偏移错位
+  的 bug），每章标题强制成为新页页首 → `goToChapter` 跳到的页 `startOffset ==
+  章节标题偏移`，标题显示在屏幕顶部。同步删除 `_pendingChapterScrollFraction`/
+  `_pendingChapterPageIndex`/`_scrollController` 等死代码。
+- **修复章节列表弹窗滚动定位偏移过大**：`_showChapterList` 原用硬编码
+  `itemExtent=56.0` 估算 `dense ListTile` 高度，但实际更矮 → `current*56`
+  滚过头，当前章被推到视口上方（如当前 39 章时第一行显示 45 章）。改为给
+  `ListView.builder` 传 `itemExtent` 固定每行高度使滚动精确，并用
+  `viewportDimension` 计算居中偏移 `current*extent + extent/2 - viewport/2`
+  （clamp 到首尾），当前章出现在列表中段；`jumpTo` 即时定位替代动画。
+
 ## 2026-09-20（已实现）
 - **新增 clarify 双向事件流**：支持后端通过 `/chat-run` 命名空间发送的 `clarify.requested` 事件，
   在待处理事项中展示选项供用户选择，并通过 `clarify.respond` 回传用户选择。

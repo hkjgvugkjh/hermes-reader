@@ -10,11 +10,14 @@ import '../services/library_cache_index.dart';
 import '../services/library_sandbox.dart';
 import '../services/library_service.dart';
 import '../services/pdf_image_decoder.dart';
-import '../services/paginator_service.dart';
+import '../services/text_break_utils.dart';
 import '../services/tts_service.dart';
 import '../providers/server_provider.dart';
 import '../services/comment_sync_service.dart';
 import '../models/reader_annotations.dart';
+
+/// 单段文字划选结果的回调：起始/结束字符偏移与选中文本。
+typedef _SelectionCallback = void Function(int start, int end, String text);
 
 /// Full-screen reader with pagination and read-aloud controls.
 class BookReaderScreen extends StatefulWidget {
@@ -32,10 +35,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   /// Full-screen reading mode (no app bar, no footer, just text).
   bool _isFullscreen = false;
-
-  final ScrollController _scrollController = ScrollController();
-  double? _pendingChapterScrollFraction;
-  int? _pendingChapterPageIndex;
 
   /// Annotation mode: when true, text selection is enabled and tapping does
   /// not navigate pages.
@@ -57,10 +56,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     'gbk': 'GBK',
   };
 
-  /// Cached key of the last layout pass so we only re-flow pages when the
-  /// font/size or available area actually changes.
-  String? _layoutKey;
-
   /// Text the user has highlighted on the current page, pending a note.
   _TextSelection? _pendingSelection;
 
@@ -70,8 +65,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   /// Bridge to the native layer that forwards hardware volume-key presses so
   /// they can be used for page navigation while this screen is active.
-  static const MethodChannel _volumeChannel =
-      MethodChannel('hermes/volume');
+  static const MethodChannel _volumeChannel = MethodChannel('hermes/volume');
   bool _volumeHandlerRegistered = false;
 
   @override
@@ -89,7 +83,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       final channels = <CommentSync>[];
       if (mode != CommentSyncMode.torrent && server.activeServer != null) {
         try {
-          channels.add(ServerCommentSync(server.getClient(server.activeServer!)));
+          channels.add(
+            ServerCommentSync(server.getClient(server.activeServer!)),
+          );
         } catch (_) {
           // Server unreachable — fall back to whatever else is enabled.
         }
@@ -100,7 +96,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       if (channels.isNotEmpty) {
         _appliedCommentSyncMode = mode;
         reader.setCommentSync(
-          channels.length == 1 ? channels.first : CompositeCommentSync(channels),
+          channels.length == 1
+              ? channels.first
+              : CompositeCommentSync(channels),
         );
       } else {
         _appliedCommentSyncMode = null;
@@ -141,8 +139,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   Future<void> _loadEncodingLabel() async {
     final book = context.read<ReaderProvider>().book;
     if (book == null) return;
-    final name =
-        const LibrarySandbox().localFileName(book.serverId, book.relativePath);
+    final name = const LibrarySandbox().localFileName(
+      book.serverId,
+      book.relativePath,
+    );
     final enc = await LibraryCacheIndex().encodingOf(name);
     if (mounted) setState(() => _encodingLabel = enc);
   }
@@ -172,8 +172,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     );
     if (chosen == null) return;
     try {
-      final content =
-          await LibraryService().readCached(book, encoding: chosen);
+      final content = await LibraryService().readCached(book, encoding: chosen);
       if (content == null) {
         _notice('无法重新解码，请返回文库列表切换');
         return;
@@ -188,7 +187,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   @override
   void dispose() {
-    _scrollController.dispose();
     if (_narrating) {
       // Leaving mid-sentence should still remember where we were.
       _saveNarration();
@@ -256,7 +254,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     // current page instead. The engine is warmed up in the background while the
     // dialog is open so playback starts without the usual model-load latency.
     final saved = await reader.loadNarration(book.id);
-    if (saved != null && saved.pageIndex < reader.pageCount && saved.pageIndex != reader.pageIndex) {
+    if (saved != null &&
+        saved.pageIndex < reader.pageCount &&
+        saved.pageIndex != reader.pageIndex) {
       tts.warmUp();
       final choice = await showDialog<String>(
         context: context,
@@ -304,12 +304,13 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
             : 0;
         _spokenBase = 0;
 
-        final result = await tts.speak(stripImageMarkers(page.content.substring(from)));
+        final result = await tts.speak(
+          stripImageMarkers(page.content.substring(from)),
+        );
         if (!mounted || !_narrating) return;
 
         if (result.fellBack && _fallbackNotice == null) {
-          _notice(
-              '服务端朗读不可用，已使用本机语音（${result.fallbackReason}）');
+          _notice('服务端朗读不可用，已使用本机语音（${result.fallbackReason}）');
           setState(() => _fallbackNotice = result.fallbackReason);
         }
 
@@ -361,7 +362,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     return Consumer<ReaderProvider>(
       builder: (context, reader, _) {
         final book = reader.book;
-        final page = reader.currentPage;
+        final content = reader.content;
         final narratable = _canNarrate(book);
 
         return Scaffold(
@@ -381,7 +382,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       tooltip: '字号',
                       onSelected: (scale) {
                         reader.updateConfig(
-                            reader.config.copyWith(fontScale: scale));
+                          reader.config.copyWith(fontScale: scale),
+                        );
                       },
                       itemBuilder: (_) => const [
                         PopupMenuItem(value: 0.85, child: Text('小')),
@@ -392,7 +394,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                     ),
                     IconButton(
                       icon: const Icon(Icons.translate),
-                      tooltip: _encodingLabel != null && _encodingLabel != 'auto'
+                      tooltip:
+                          _encodingLabel != null && _encodingLabel != 'auto'
                           ? '文本编码：${_encodingLabel!.toUpperCase()}'
                           : '文本编码',
                       onPressed: () => _switchEncoding(context),
@@ -417,9 +420,11 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                              content: Text(reader.isBookmarkedAtCurrentPage
-                                  ? '已添加书签'
-                                  : '已移除书签'),
+                              content: Text(
+                                reader.isBookmarkedAtCurrentPage
+                                    ? '已添加书签'
+                                    : '已移除书签',
+                              ),
                               duration: const Duration(seconds: 1),
                             ),
                           );
@@ -427,9 +432,12 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       },
                     ),
                     IconButton(
-                      icon: Icon(_annotationMode ? Icons.edit : Icons.edit_outlined),
+                      icon: Icon(
+                        _annotationMode ? Icons.edit : Icons.edit_outlined,
+                      ),
                       tooltip: _annotationMode ? '退出批注' : '批注模式',
-                      onPressed: () => setState(() => _annotationMode = !_annotationMode),
+                      onPressed: () =>
+                          setState(() => _annotationMode = !_annotationMode),
                     ),
                     IconButton(
                       icon: const Icon(Icons.comment_outlined),
@@ -439,51 +447,80 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                   ],
                 )
               : null,
-          body: page == null
+          // NOTE: gate on *content*, not on the current page. Pagination is
+          // kicked off by the LayoutBuilder below (syncViewportChars), so if we
+          // hid it while `page == null` (which is exactly the state before the
+          // first pagination finishes) the LayoutBuilder would never build, no
+          // pages would ever be computed, and the reader would be stuck on
+          // "没有可显示的内容" forever.
+          body: content == null || content.text.trim().isEmpty
               ? const Center(child: Text('没有可显示的内容'))
               : Column(
                   children: [
-                    if (_fallbackNotice != null && _controlsVisible && !_isFullscreen)
+                    if (_fallbackNotice != null &&
+                        _controlsVisible &&
+                        !_isFullscreen)
                       _FallbackBanner(reason: _fallbackNotice!),
                     Expanded(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
-                          final content = reader.content;
                           // Compute max heights for pagination (available text area).
                           // These are used both for pagination and for constraining
                           // the rendered content to prevent scrolling.
-                          final safePadding = MediaQuery.of(context).padding;
-                          final fullscreenMaxHeight = constraints.maxHeight -
-                              32 - safePadding.top - safePadding.bottom;
-                          final nonFullscreenMaxHeight = constraints.maxHeight -
-                              100 - safePadding.top - safePadding.bottom;
-                          if (content != null && constraints.maxHeight > 0) {
-                            final fontScale = reader.config.fontScale;
-                            final style = TextStyle(
-                              fontSize: 17 * fontScale,
-                              height: reader.config.lineHeightFactor,
+                          //
+                          // The body sits inside a SafeArea (see the builder's
+                          // return value), so the SafeArea insets must come out of
+                          // the fixed-height page box — otherwise the box is
+                          // clamped shorter than the paginated height and the
+                          // page Column overflows by the missing pixels.
+                          final insets = MediaQuery.of(context).padding;
+                          // 显示区域实际可用尺寸（body 已被 Scaffold 去掉 appBar/footer，
+                          // 这里再减去系统安全区）。渲染盒子的总高/宽就是这两个值。
+                          final availH =
+                              constraints.maxHeight -
+                              insets.top -
+                              insets.bottom;
+                          final availW = constraints.maxWidth;
+                          if (constraints.maxHeight > 0) {
+                            // Exact, measurement-based pagination: the screen
+                            // hands the real text area to the paginator, which
+                            // fills every page to the pixel (no third-of-a-page
+                            // gap, no overflow). Debounced inside the provider.
+                            final fontSize =
+                                ReaderConfig.baseFontSize * reader.config.fontScale;
+                            // 一行高度：同时作为渲染与测量的四边留白，二者必须一致；
+                            // 亚像素级别的微小差异由 ClipRect 兜底裁切，不再额外预留 safety。
+                            final lineH =
+                                fontSize * reader.config.lineHeightFactor;
+                            final margin = lineH; // 上下左右各空一行
+                            // 渲染文字盒必须与分页测量的盒子逐一对齐：SafeArea 扣掉
+                            // 左右安全区（insets.left/right），_wrapPagedColumn 的
+                            // Padding 扣掉四边各 margin。不再额外减 safety，让每页文字
+                            // 按真实容量填满、没有人为限制的空白；ClipRect 仅作亚像素
+                            // 级别的兜底裁切。
+                            final maxW =
+                                availW - insets.left - insets.right - margin * 2;
+                            final maxH = availH - margin * 2;
+                            // TextStyle.height is a *multiplier* of fontSize, not
+                            // an absolute pixel line height — it must match what
+                            // [_buildPageBody] renders with, otherwise the
+                            // measured page capacity is off and pages come out
+                            // nearly empty.
+                            // Hand the paginator a box one half-line smaller than
+                            // the real render box, so even sub-pixel differences
+                            // between TextPainter measurement and on-screen Text
+                            // (and the trailing-newline blank line) never overflow.
+                            // The render box keeps the full maxH; this is the
+                            // "safety buffer" referenced in [_wrapPagedColumn].
+                            reader.syncViewportChars(
+                              style: TextStyle(
+                                fontSize: fontSize,
+                                height: reader.config.lineHeightFactor,
+                              ),
+                              maxWidth: maxW,
+                              maxHeight: maxH - margin * 0.5,
+                              fullscreen: _isFullscreen,
                             );
-                            final key =
-                                '${content.text.length}:$fontScale:'
-                                '${constraints.maxWidth.toInt()}:'
-                                '${constraints.maxHeight.toInt()}:'
-                                '$_isFullscreen';
-                            if (key != _layoutKey) {
-                              _layoutKey = key;
-                              // Compute pages for the current chapter only.
-                              final chapterIdx = reader.currentChapterIndex;
-                              if (chapterIdx >= 0) {
-                                reader.ensureChapterPages(
-                                  chapterIdx,
-                                  style: style,
-                                  maxWidth: constraints.maxWidth - 40,
-                                  maxHeight: fullscreenMaxHeight,
-                                  nonFullscreenMaxHeight: nonFullscreenMaxHeight,
-                                ).then((_) {
-                                  if (mounted) setState(() {});
-                                });
-                              }
-                            }
                           }
                           // Show spinner while pages are being computed.
                           if (reader.isPaginating || reader.pages.isEmpty) {
@@ -499,8 +536,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
                               final renderBox =
                                   context.findRenderObject() as RenderBox;
-                              final localPos = renderBox
-                                  .globalToLocal(details.globalPosition);
+                              final localPos = renderBox.globalToLocal(
+                                details.globalPosition,
+                              );
                               final fraction = renderBox.size.width > 0
                                   ? localPos.dx / renderBox.size.width
                                   : 0.5;
@@ -508,7 +546,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               // In fullscreen mode: left/right zones navigate,
                               // center tap returns to non-fullscreen.
                               if (_isFullscreen) {
-                                if (reader.config.tapZoneMode == TapZoneMode.thirds &&
+                                if (reader.config.tapZoneMode ==
+                                        TapZoneMode.thirds &&
                                     reader.isToggleZone(fraction)) {
                                   setState(() => _isFullscreen = false);
                                 } else {
@@ -518,7 +557,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               }
 
                               // In three-zone mode, center tap toggles fullscreen.
-                              if (reader.config.tapZoneMode == TapZoneMode.thirds &&
+                              if (reader.config.tapZoneMode ==
+                                      TapZoneMode.thirds &&
                                   reader.isToggleZone(fraction)) {
                                 setState(() => _isFullscreen = true);
                                 return;
@@ -539,11 +579,13 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               }
                             },
                             child: SafeArea(
-                              child: _buildPageBody(context, reader,
-                                  onSelection: _onPageSelection,
-                                  contentMaxHeight: _isFullscreen
-                                      ? fullscreenMaxHeight
-                                      : nonFullscreenMaxHeight),
+                              child: _buildPageBody(
+                                context,
+                                reader,
+                                onSelection: _onPageSelection,
+                                contentMaxHeight: availH,
+                                contentMaxWidth: availW,
+                              ),
                             ),
                           );
                         },
@@ -562,8 +604,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         onJump: () => _showJump(reader),
                         chapterTitle: reader.hasChapters
                             ? (reader.currentChapterIndex >= 0
-                                ? reader.chapters[reader.currentChapterIndex].title
-                                : null)
+                                  ? reader
+                                        .chapters[reader.currentChapterIndex]
+                                        .title
+                                  : null)
                             : null,
                       ),
                   ],
@@ -595,15 +639,22 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Text('阅读设置',
-                        style: TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.bold)),
+                    const Text(
+                      '阅读设置',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     const SizedBox(height: 8),
-                    const Text('点击分区',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey,
-                            fontWeight: FontWeight.bold)),
+                    const Text(
+                      '点击分区',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     ...TapZoneMode.values.map(
                       (mode) => RadioListTile<TapZoneMode>(
                         title: Text(mode.label),
@@ -629,11 +680,14 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                           apply(config.copyWith(autoTurnPage: value)),
                     ),
                     const SizedBox(height: 8),
-                    const Text('共享评论通道',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey,
-                            fontWeight: FontWeight.bold)),
+                    const Text(
+                      '共享评论通道',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     ...CommentSyncMode.values.map(
                       (mode) => RadioListTile<CommentSyncMode>(
                         title: Text(mode.label),
@@ -646,11 +700,14 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    const Text('朗读引擎',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey,
-                            fontWeight: FontWeight.bold)),
+                    const Text(
+                      '朗读引擎',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     ...TtsMode.values.map(
                       (mode) => RadioListTile<TtsMode>(
                         title: Text(mode.label),
@@ -660,20 +717,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                           if (value == null) return;
                           apply(config.copyWith(ttsMode: value));
                         },
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text('每页字数：${config.charsPerPage}',
-                        style: const TextStyle(fontSize: 12)),
-                    Slider(
-                      value: config.charsPerPage.toDouble(),
-                      min: 300,
-                      max: 2000,
-                      divisions: 17,
-                      label: '${config.charsPerPage}',
-                      onChanged: (value) => apply(
-                        config.copyWith(
-                            charsPerPage: (value ~/ 50) * 50),
                       ),
                     ),
                   ],
@@ -701,22 +744,28 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   void _showChapterList(ReaderProvider reader) {
     final current = reader.currentChapterIndex;
     final scrollController = ScrollController();
+    // Fixed item extent so scroll math is exact: a free-form ListTile's real
+    // height depends on font/theme and never matches a hand-picked constant,
+    // which previously overshot (e.g. chapter 39 ended up below the fold with
+    // chapter 45 on the first row).
+    const itemExtent = 56.0;
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) {
-        // Scroll to current chapter after the sheet is rendered
+        // Centre the current chapter in the visible area after the sheet is
+        // laid out, so the active heading sits in the middle of the list
+        // (clamped to the top/bottom near the ends).
         if (current >= 0) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (scrollController.hasClients) {
-              final itemExtent = 56.0;
-              final targetOffset = (current * itemExtent)
-                  .clamp(0.0, scrollController.position.maxScrollExtent);
-              scrollController.animateTo(
-                targetOffset,
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOut,
-              );
-            }
+            if (!scrollController.hasClients) return;
+            final pos = scrollController.position;
+            final viewport = pos.viewportDimension;
+            final target =
+                (current * itemExtent + itemExtent / 2 - viewport / 2).clamp(
+                  0.0,
+                  pos.maxScrollExtent,
+                );
+            scrollController.jumpTo(target);
           });
         }
         return SafeArea(
@@ -724,12 +773,15 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
             children: [
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text('选择章节',
-                    style: Theme.of(context).textTheme.titleMedium),
+                child: Text(
+                  '选择章节',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
               ),
               Expanded(
                 child: ListView.builder(
                   controller: scrollController,
+                  itemExtent: itemExtent,
                   itemCount: reader.chapters.length,
                   itemBuilder: (_, i) {
                     final ch = reader.chapters[i];
@@ -739,21 +791,23 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       title: Text(
                         ch.title,
                         style: TextStyle(
-                          fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                          fontWeight: active
+                              ? FontWeight.bold
+                              : FontWeight.normal,
                           color: active
                               ? Theme.of(context).colorScheme.primary
                               : null,
                         ),
                       ),
                       trailing: active
-                          ? Icon(Icons.bookmark,
+                          ? Icon(
+                              Icons.bookmark,
                               size: 16,
-                              color: Theme.of(context).colorScheme.primary)
+                              color: Theme.of(context).colorScheme.primary,
+                            )
                           : null,
                       onTap: () {
                         reader.goToChapter(i);
-                        _pendingChapterScrollFraction = 0.1;
-                        _pendingChapterPageIndex = reader.pageIndex;
                         Navigator.pop(ctx);
                       },
                     );
@@ -824,8 +878,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   void _onPageSelection(int start, int end, String text) {
     setState(() {
-      _pendingSelection =
-          (text.isEmpty || end <= start) ? null : _TextSelection(start, end, text);
+      _pendingSelection = (text.isEmpty || end <= start)
+          ? null
+          : _TextSelection(start, end, text);
     });
   }
 
@@ -854,12 +909,19 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                 color: Colors.yellow.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(6),
               ),
-              child: Text(sel.text, maxLines: 4, overflow: TextOverflow.ellipsis),
+              child: Text(
+                sel.text,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: controller,
-              decoration: const InputDecoration(labelText: '笔记 / 评论', border: OutlineInputBorder()),
+              decoration: const InputDecoration(
+                labelText: '笔记 / 评论',
+                border: OutlineInputBorder(),
+              ),
               maxLines: 3,
             ),
             const SizedBox(height: 12),
@@ -914,9 +976,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
           onPublish: (note) async {
             final ok = await reader.publishComment(note);
             if (mounted && !ok && ctx.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('发布失败：未连接到共享服务器')),
-              );
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('发布失败：未连接到共享服务器')));
             }
           },
           onRemoveNote: (id) => reader.removeNote(id),
@@ -925,60 +987,40 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     );
   }
 
-  Widget _buildPageBody(
-    BuildContext context,
-    ReaderProvider reader, {
-    void Function(int start, int end, String text)? onSelection,
-    double? contentMaxHeight,
-  }) {
+  Widget _buildPageBody(BuildContext context, ReaderProvider reader, {_SelectionCallback? onSelection, double? contentMaxHeight, double? contentMaxWidth}) {
     final page = reader.currentPage;
     if (page == null) return const SizedBox.shrink();
 
-    final images = reader.images;
     final fontScale = reader.config.fontScale;
-    final style = TextStyle(
-      fontSize: 17 * fontScale,
-      height: reader.config.lineHeightFactor,
-    );
-    final maxWidth = MediaQuery.of(context).size.width - 40;
+    final style = TextStyle(fontSize: ReaderConfig.baseFontSize * fontScale, height: reader.config.lineHeightFactor);
+    // 渲染文字盒子的宽度：用 body 实际宽度（contentMaxWidth），不要用
+    // MediaQuery.size.width（在带安全区/刘海的机型上会偏宽，导致渲染比测量宽、
+    // 行数更多、从而溢出）。仅用于图片尺寸估算，文字宽度由外层 Padding 决定。
+    final fontSize = style.fontSize ?? ReaderConfig.baseFontSize;
+    final maxWidth = (contentMaxWidth ?? MediaQuery.of(context).size.width) - fontSize * 2;
 
-    final content = page.content;
+    // 格式分派：只有 PDF 抽取时会在文本流里写入 \u0000IMG<n>\u0000 内联图标记，
+    // 此时 reader.images 非空，需要图文交错渲染；其余格式（txt/epub/mobi/
+    // html/json/unknown 等）都是纯文字，整段直接渲染即可。
+    final widgets = reader.images.isEmpty
+        ? _buildPlainTextPage(page.content, style, page, onSelection)
+        : _buildPdfPage(page.content, style, reader.images, maxWidth, page, onSelection);
+
+    return _wrapPagedColumn(widgets, style, contentMaxHeight);
+  }
+
+  /// 纯文字格式（txt/epub/mobi/html/json/unknown 等）：整页作为一段渲染。
+  List<Widget> _buildPlainTextPage(String content, TextStyle style, BookPage page, _SelectionCallback? onSelection) => [_buildTextSegment(content, style, 0, page, onSelection)];
+
+  /// PDF 页面：文本流里嵌有 `\u0000IMG<n>\u0000` 内联图标记，需把文字段与图片按
+  /// 阅读顺序交错插入。
+  List<Widget> _buildPdfPage(String content, TextStyle style, List<PdfImage> images, double maxWidth, BookPage page, _SelectionCallback? onSelection) {
     final widgets = <Widget>[];
     var last = 0;
     for (final m in imageMarkerRegex.allMatches(content)) {
       final text = content.substring(last, m.start);
       if (text.isNotEmpty) {
-        final base = last;
-        if (_annotationMode) {
-          widgets.add(
-            SelectableText(
-              text,
-              style: style,
-              textAlign: TextAlign.justify,
-              onSelectionChanged: onSelection == null
-                  ? null
-                  : (sel, _) {
-                      if (!sel.isValid || sel.isCollapsed) {
-                        onSelection(page.startOffset + base, page.startOffset + base, '');
-                        return;
-                      }
-                      onSelection(
-                        page.startOffset + base + sel.start,
-                        page.startOffset + base + sel.end,
-                        text.substring(sel.start, sel.end),
-                      );
-                    },
-            ),
-          );
-        } else {
-          widgets.add(
-            Text(
-              text,
-              style: style,
-              textAlign: TextAlign.justify,
-            ),
-          );
-        }
+        widgets.add(_buildTextSegment(text, style, last, page, onSelection));
       }
       final index = int.tryParse(m.group(1)!);
       final img = index != null && index < images.length ? images[index] : null;
@@ -987,71 +1029,73 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     }
     final tail = content.substring(last);
     if (tail.isNotEmpty) {
-      final base = last;
-      if (_annotationMode) {
-        widgets.add(
-          SelectableText(
-            tail,
-            style: style,
-            textAlign: TextAlign.justify,
-            onSelectionChanged: onSelection == null
-                ? null
-                : (sel, _) {
-                    if (!sel.isValid || sel.isCollapsed) {
-                      onSelection(page.startOffset + base, page.startOffset + base, '');
-                      return;
-                    }
-                    onSelection(
-                      page.startOffset + base + sel.start,
-                      page.startOffset + base + sel.end,
-                      tail.substring(sel.start, sel.end),
-                    );
-                  },
-          ),
-        );
-      } else {
-        widgets.add(
-          Text(
-            tail,
-            style: style,
-            textAlign: TextAlign.justify,
-          ),
-        );
-      }
+      widgets.add(_buildTextSegment(tail, style, last, page, onSelection));
     }
+    return widgets;
+  }
 
-    // Use a fixed-height Column instead of SingleChildScrollView to prevent
-    // scrolling. The pagination algorithm ensures content fits within
-    // contentMaxHeight. Fall back to scrollable only for chapter jumps.
-    final column = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: widgets,
-    );
+  // 与分页器测量用的 TextHeightBehavior 完全一致，保证“测量高度 == 渲染高度”，
+  // 否则两端首尾行 ascent/descent 处理不同会让页面底部出现空白或溢出。
+  static const TextHeightBehavior _kPageTextHeightBehavior = TextHeightBehavior(
+    applyHeightToFirstAscent: true,
+    applyHeightToLastDescent: true,
+  );
 
-    // Scroll to the chapter heading after jumping from the TOC.
-    final targetPageIndex = _pendingChapterPageIndex;
-    final targetFraction = _pendingChapterScrollFraction;
-    if (targetPageIndex != null && reader.pageIndex == targetPageIndex && targetFraction != null) {
-      _pendingChapterPageIndex = null;
-      _pendingChapterScrollFraction = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scrollController.hasClients) return;
-        final maxScroll = _scrollController.position.maxScrollExtent;
-        _scrollController.jumpTo(maxScroll * targetFraction);
-      });
+  /// 渲染一段文字。批注模式下用 [SelectableText] 以支持划选高亮，否则用普通
+  /// [Text]。
+  Widget _buildTextSegment(String text, TextStyle style, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
+    // justify 布局会折叠每行行首空白（SkParagraph 行为），段首缩进 U+3000
+    // 因此完全消失。渲染前替换成等长、不折叠的隐形占位 U+3164（宽度=1em）。
+    // 等长替换 => 选区偏移换算不受影响。见 [uncollapseLeadingIndents]。
+    text = uncollapseLeadingIndents(text);
+    // Pin textScaleFactor to 1.0 so the on-screen Text matches the paginator's
+    // TextPainter measurement (which always uses 1.0). The app controls font
+    // size via reader.config.fontSize, so letting the system font scaler apply
+    // on top would make rendered text taller than measured and overflow pages.
+    if (_annotationMode) {
+      return SelectableText(
+        text,
+        style: style,
+        textAlign: TextAlign.justify,
+        textHeightBehavior: _kPageTextHeightBehavior,
+        textScaler: TextScaler.linear(1.0),
+        // onSelectionChanged 签名固定且需捕获本段局部状态，这里只做一行转发，
+        // 真正的换算逻辑见 [_reportSegmentSelection]。
+        onSelectionChanged: onSelection == null ? null : (sel, _) => _reportSegmentSelection(sel, text, baseOffset, page, onSelection),
+      );
     }
+    return Text(text, style: style, textAlign: TextAlign.justify, textHeightBehavior: _kPageTextHeightBehavior, textScaler: TextScaler.linear(1.0));
+  }
+
+  /// 把单段文字上的划选结果换算成全书字符区间并上报给 [onSelection]。
+  ///
+  /// [baseOffset] 是该段文字在整页 `content` 中的起始下标；[page.startOffset]
+  /// 是整页在全书文本中的起始下标。空选（无效或已折叠）上报一个空区间。
+  void _reportSegmentSelection(TextSelection sel, String text, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
+    if (!sel.isValid || sel.isCollapsed) {
+      onSelection?.call(page.startOffset + baseOffset, page.startOffset + baseOffset, '');
+      return;
+    }
+    onSelection?.call(page.startOffset + baseOffset + sel.start, page.startOffset + baseOffset + sel.end,
+        // 渲染文本中的行首缩进占位 U+3164 还原成原字符 U+3000，保证上报的
+        // 选中文本与书籍原文一致。
+        text.substring(sel.start, sel.end).replaceAll('\u3164', '\u3000'));
+  }
+
+  /// 用定高、裁切的 Column 包裹整页 widget。
+  ///
+  /// 用固定高度 Column（而非 SingleChildScrollView）来禁止滚动：分页算法已保证
+  /// 内容能放进 [contentMaxHeight]。外层 SizedBox 固定为 contentMaxHeight，内层
+  /// Padding 四边各留一行（margin = 一行高度），文字盒子 = contentMaxHeight
+  /// - 2*margin。分页器测量的盒子比这再小一个 safety 缓冲，所以即便渲染比
+  /// 测量高几像素也绝不会溢出 Column。ClipRect 作为最终兜底裁掉任何溢出。
+  Widget _wrapPagedColumn(List<Widget> widgets, TextStyle style, double? contentMaxHeight) {
+    final column = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: widgets);
 
     if (contentMaxHeight != null) {
-      // Constrain content to the available height for the current mode.
-      // SizedBox forces the height; ClipRect clips any overflow as a safety net.
-      // In fullscreen mode contentMaxHeight = fullscreenMaxHeight;
-      // in non-fullscreen mode it = nonFullscreenMaxHeight.
-      return SizedBox(
-        height: contentMaxHeight,
-        child: ClipRect(
-          child: column,
-        ),
-      );
+      // 一行高度：与 LayoutBuilder 里传给分页器的 margin 完全一致。
+      final margin = (style.fontSize ?? ReaderConfig.baseFontSize) * (style.height ?? 1.0);
+      return SizedBox(height: contentMaxHeight, child: ClipRect(child: Padding(padding: EdgeInsets.all(margin), child: column)));
     }
 
     // Fallback when no valid max height is available (page null or constraints
@@ -1064,10 +1108,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Center(
         child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: maxWidth,
-            maxHeight: 520,
-          ),
+          constraints: BoxConstraints(maxWidth: maxWidth, maxHeight: 520),
           child: Image.memory(
             img.bytes,
             fit: BoxFit.contain,
@@ -1078,7 +1119,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       ),
     );
   }
-
 }
 
 class _FallbackBanner extends StatelessWidget {
@@ -1106,11 +1146,10 @@ class _FallbackBanner extends StatelessWidget {
       ),
     );
   }
-
 }
 
-  /// Renders the current page's text with any inline images interleaved. The
-  /// body scrolls so a picture taller than the screen stays reachable.
+/// Renders the current page's text with any inline images interleaved. The
+/// body scrolls so a picture taller than the screen stays reachable.
 class _ReaderFooter extends StatelessWidget {
   const _ReaderFooter({
     required this.pageIndex,
@@ -1172,8 +1211,10 @@ class _ReaderFooter extends StatelessWidget {
                 onTap: onJump,
                 borderRadius: BorderRadius.circular(6),
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1183,8 +1224,7 @@ class _ReaderFooter extends StatelessWidget {
                         color: footerStyle.color,
                       ),
                       const SizedBox(width: 4),
-                      Text('${pageIndex + 1} / $pageCount',
-                          style: footerStyle),
+                      Text('${pageIndex + 1} / $pageCount', style: footerStyle),
                     ],
                   ),
                 ),
@@ -1196,14 +1236,16 @@ class _ReaderFooter extends StatelessWidget {
                 onPressed: onPrev,
               ),
               IconButton(
-                icon: Icon(narrating
-                    ? Icons.stop_circle_outlined
-                    : Icons.record_voice_over),
+                icon: Icon(
+                  narrating
+                      ? Icons.stop_circle_outlined
+                      : Icons.record_voice_over,
+                ),
                 tooltip: !canNarrate
                     ? '该格式不支持朗读'
                     : narrating
-                        ? '停止朗读'
-                        : '朗读',
+                    ? '停止朗读'
+                    : '朗读',
                 // Resuming from a saved offset is handled inside onNarrate.
                 onPressed: canNarrate ? () => onNarrate() : null,
               ),
@@ -1325,8 +1367,11 @@ class _NoteTile extends StatelessWidget {
                 color: Colors.yellow.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(4),
               ),
-              child: Text(note.quotedText,
-                  maxLines: 3, overflow: TextOverflow.ellipsis),
+              child: Text(
+                note.quotedText,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
             if (note.comment != null && note.comment!.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -1362,10 +1407,9 @@ class _CommentTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = comment.createdAt > 0
-        ? DateTime.fromMillisecondsSinceEpoch(comment.createdAt)
-            .toLocal()
-            .toString()
-            .substring(0, 16)
+        ? DateTime.fromMillisecondsSinceEpoch(
+            comment.createdAt,
+          ).toLocal().toString().substring(0, 16)
         : '';
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
@@ -1381,8 +1425,11 @@ class _CommentTile extends StatelessWidget {
                   color: Colors.blue.withOpacity(0.08),
                   borderRadius: BorderRadius.circular(4),
                 ),
-                child: Text(comment.quotedText,
-                    maxLines: 3, overflow: TextOverflow.ellipsis),
+                child: Text(
+                  comment.quotedText,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             if (comment.comment.isNotEmpty) ...[
               const SizedBox(height: 8),
