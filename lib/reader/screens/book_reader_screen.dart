@@ -1044,10 +1044,6 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// 渲染一段文字。批注模式下用 [SelectableText] 以支持划选高亮，否则用普通
   /// [Text]。
   Widget _buildTextSegment(String text, TextStyle style, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
-    // justify 布局会折叠每行行首空白（SkParagraph 行为），段首缩进 U+3000
-    // 因此完全消失。渲染前替换成等长、不折叠的隐形占位 U+3164（宽度=1em）。
-    // 等长替换 => 选区偏移换算不受影响。见 [uncollapseLeadingIndents]。
-    text = uncollapseLeadingIndents(text);
     // Pin textScaleFactor to 1.0 so the on-screen Text matches the paginator's
     // TextPainter measurement (which always uses 1.0). The app controls font
     // size via reader.config.fontSize, so letting the system font scaler apply

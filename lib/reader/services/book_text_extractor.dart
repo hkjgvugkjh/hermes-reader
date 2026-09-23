@@ -53,7 +53,7 @@ class DefaultBookTextExtractor implements BookTextExtractor {
   }) async {
     switch (type) {
       case FileType.plainText:
-        return ExtractedText(decodeText(bytes, encoding: encoding));
+        return ExtractedText(cleanText(decodeText(bytes, encoding: encoding)));
       case FileType.html:
       case FileType.mobi:
         // MOBI wraps HTML, so the same tag stripping applies; whatever is left

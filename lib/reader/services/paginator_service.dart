@@ -232,10 +232,6 @@ class PaginatorService {
   }) {
     final pages = <PageEntry>[];
     if (chapterText.isEmpty || maxHeight <= 0 || maxWidth <= 0) return pages;
-    // justify 布局会折叠行首空白（含段首缩进 U+3000），先把它们替换成不
-    // 折叠的等长占位 U+3164，保证测量与渲染一致且缩进宽度参与排版。
-    // 替换 1:1 等长，本函数返回的 offsets 不受影响。
-    chapterText = uncollapseLeadingIndents(chapterText);
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       maxLines: null,
@@ -565,7 +561,7 @@ class PaginatorService {
 
     /// Measures the actual rendered height of [text] at [maxWidth].
     double measureHeight(String text) {
-      painter.text = TextSpan(text: uncollapseLeadingIndents(text), style: style);
+      painter.text = TextSpan(text: text, style: style);
       painter.layout(maxWidth: maxWidth);
       return painter.height;
     }
@@ -766,7 +762,7 @@ class PaginatorService {
     );
 
     double measure(String text) {
-      painter.text = TextSpan(text: uncollapseLeadingIndents(text), style: style);
+      painter.text = TextSpan(text: text, style: style);
       painter.layout(maxWidth: maxWidth);
       return painter.height;
     }
