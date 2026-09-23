@@ -112,6 +112,10 @@ class ReaderConfig {
   /// Which channel(s) shared comments use.
   final CommentSyncMode commentSyncMode;
 
+  /// [DEBUG] Replace all U+3000 fullwidth spaces with '口' for diagnosing
+  /// rendering issues. Default off.
+  final bool debugReplaceFullwidthSpace;
+
   const ReaderConfig({
     this.ttsMode = TtsMode.auto,
     this.monitorInterval = const Duration(seconds: 60),
@@ -124,6 +128,7 @@ class ReaderConfig {
     this.tapZoneMode = TapZoneMode.thirds,
     this.leftZoneForward = false,
     this.commentSyncMode = CommentSyncMode.server,
+    this.debugReplaceFullwidthSpace = false,
   }) : assert(charsPerPage > 0, 'charsPerPage must be positive');
 
   ReaderConfig copyWith({
@@ -138,6 +143,7 @@ class ReaderConfig {
     TapZoneMode? tapZoneMode,
     bool? leftZoneForward,
     CommentSyncMode? commentSyncMode,
+    bool? debugReplaceFullwidthSpace,
   }) =>
       ReaderConfig(
         ttsMode: ttsMode ?? this.ttsMode,
@@ -151,6 +157,8 @@ class ReaderConfig {
         tapZoneMode: tapZoneMode ?? this.tapZoneMode,
         leftZoneForward: leftZoneForward ?? this.leftZoneForward,
         commentSyncMode: commentSyncMode ?? this.commentSyncMode,
+        debugReplaceFullwidthSpace:
+            debugReplaceFullwidthSpace ?? this.debugReplaceFullwidthSpace,
       );
 
   Map<String, dynamic> toJson() => {
@@ -165,6 +173,7 @@ class ReaderConfig {
         'tapZoneMode': tapZoneMode.name,
         'leftZoneForward': leftZoneForward,
         'commentSyncMode': commentSyncMode.name,
+        'debugReplaceFullwidthSpace': debugReplaceFullwidthSpace,
       };
 
   factory ReaderConfig.fromJson(Map<String, dynamic> json) => ReaderConfig(
@@ -190,5 +199,7 @@ class ReaderConfig {
           (e) => e.name == json['commentSyncMode'],
           orElse: () => CommentSyncMode.server,
         ),
+        debugReplaceFullwidthSpace:
+            json['debugReplaceFullwidthSpace'] as bool? ?? false,
       );
 }

@@ -679,6 +679,13 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                       onChanged: (value) =>
                           apply(config.copyWith(autoTurnPage: value)),
                     ),
+                    SwitchListTile(
+                      title: const Text('[调试] 全角空格→口'),
+                      subtitle: const Text('将 U+3000 替换为"口"以排查显示问题'),
+                      value: config.debugReplaceFullwidthSpace,
+                      onChanged: (value) => apply(
+                          config.copyWith(debugReplaceFullwidthSpace: value)),
+                    ),
                     const SizedBox(height: 8),
                     const Text(
                       '共享评论通道',
@@ -1044,6 +1051,11 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// 渲染一段文字。批注模式下用 [SelectableText] 以支持划选高亮，否则用普通
   /// [Text]。
   Widget _buildTextSegment(String text, TextStyle style, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
+    // 临时调试开关：将全角空格 U+3000 替换为"口"以排查显示问题
+    final config = context.read<ReaderProvider>().config;
+    if (config.debugReplaceFullwidthSpace) {
+      text = text.replaceAll('\u3000', '口');
+    }
     // Pin textScaleFactor to 1.0 so the on-screen Text matches the paginator's
     // TextPainter measurement (which always uses 1.0). The app controls font
     // size via reader.config.fontSize, so letting the system font scaler apply
