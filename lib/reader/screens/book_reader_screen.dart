@@ -1050,17 +1050,55 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
 
   /// 渲染一段文字。批注模式下用 [SelectableText] 以支持划选高亮，否则用普通
   /// [Text]。
+  ///
+  /// 段首连续 U+3000（全角空格）在 `TextAlign.justify` 下会被折叠为零宽，
+  /// 导致中文段首缩进消失。这里将段首 U+3000 替换为等宽 [WidgetSpan]，
+  /// 使缩进作为内联 widget 渲染，不被 justify 折叠。
   Widget _buildTextSegment(String text, TextStyle style, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
     // 临时调试开关：将全角空格 U+3000 替换为"口"以排查显示问题
     final config = context.read<ReaderProvider>().config;
     if (config.debugReplaceFullwidthSpace) {
       text = text.replaceAll('\u3000', '口');
     }
+
+    // 检测段首连续 U+3000
+    final indentMatch = RegExp(r'^(\u3000+)').firstMatch(text);
+    final indentCount = indentMatch?.group(1)?.length ?? 0;
+    final fontSize = style.fontSize ?? ReaderConfig.baseFontSize;
+
     // Pin textScaleFactor to 1.0 so the on-screen Text matches the paginator's
     // TextPainter measurement (which always uses 1.0). The app controls font
     // size via reader.config.fontSize, so letting the system font scaler apply
     // on top would make rendered text taller than measured and overflow pages.
     if (_annotationMode) {
+      if (indentCount > 0) {
+        final indentWidth = fontSize * indentCount;
+        final textAfterIndent = text.substring(indentCount);
+        return SelectableText.rich(
+          TextSpan(
+            children: [
+              WidgetSpan(
+                alignment: PlaceholderAlignment.baseline,
+                baseline: TextBaseline.alphabetic,
+                child: SizedBox(width: indentWidth),
+              ),
+              TextSpan(text: textAfterIndent, style: style),
+            ],
+          ),
+          textAlign: TextAlign.justify,
+          textHeightBehavior: _kPageTextHeightBehavior,
+          textScaler: TextScaler.linear(1.0),
+          onSelectionChanged: onSelection == null
+              ? null
+              : (sel, _) => _reportSegmentSelection(
+                    sel,
+                    textAfterIndent,
+                    baseOffset + indentCount,
+                    page,
+                    onSelection,
+                  ),
+        );
+      }
       return SelectableText(
         text,
         style: style,
@@ -1072,6 +1110,27 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
         onSelectionChanged: onSelection == null ? null : (sel, _) => _reportSegmentSelection(sel, text, baseOffset, page, onSelection),
       );
     }
+
+    if (indentCount > 0) {
+      final indentWidth = fontSize * indentCount;
+      final textAfterIndent = text.substring(indentCount);
+      return RichText(
+        text: TextSpan(
+          children: [
+            WidgetSpan(
+              alignment: PlaceholderAlignment.baseline,
+              baseline: TextBaseline.alphabetic,
+              child: SizedBox(width: indentWidth),
+            ),
+            TextSpan(text: textAfterIndent, style: style),
+          ],
+        ),
+        textAlign: TextAlign.justify,
+        textHeightBehavior: _kPageTextHeightBehavior,
+        textScaler: TextScaler.linear(1.0),
+      );
+    }
+
     return Text(text, style: style, textAlign: TextAlign.justify, textHeightBehavior: _kPageTextHeightBehavior, textScaler: TextScaler.linear(1.0));
   }
 

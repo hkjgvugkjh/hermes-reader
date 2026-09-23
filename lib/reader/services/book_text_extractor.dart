@@ -159,13 +159,21 @@ class DefaultBookTextExtractor implements BookTextExtractor {
   }
 
   /// Collapses whitespace and drops control characters that survived decoding.
+  ///
+  /// 注意：保留 U+3000（全角空格/段首缩进），仅折叠其他空白字符。
+  /// U+3000 在中文排版中用作段首缩进，替换为普通空格会导致缩进消失。
+  /// 使用保护-恢复方式：先将 U+3000 替换为 \u0001，清理后再恢复。
   static String cleanText(String input) {
     final text = input.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-    final cleaned = text.replaceAllMapped(
+    // 保护 U+3000，临时替换为 \u0001（不会被正则匹配）
+    final protected = text.replaceAll('\u3000', '\u0001');
+    final cleaned = protected.replaceAllMapped(
       RegExp(r'[^\S\n]+'),
       (_) => ' ',
     );
+    // 恢复 U+3000
     return cleaned
+        .replaceAll('\u0001', '\u3000')
         .replaceAll(RegExp(r'\n{3,}'), '\n\n')
         .split('\n')
         .map((line) => line.trimRight()) // 保留行首空格，仅去行尾空白
