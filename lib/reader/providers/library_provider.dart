@@ -427,6 +427,11 @@ class ReaderProvider extends ChangeNotifier {
   ///
   /// Used by [_syncPagesForMode] to populate [BookPage.content] from the
   /// chapter page info. Returns null when the offset is out of range.
+  ///
+  /// The returned content is rtrimmed to remove trailing whitespace/newlines
+  /// that would otherwise cause the rendered Text to overflow its measured
+  /// height (trailing whitespace is collapsed by the layout engine but
+  /// still occupies vertical space in some font configurations).
   String? pageContentAtOffset(int offset, {required bool fullscreen}) {
     final text = _content?.text;
     if (text == null || offset < 0 || offset >= text.length) return null;
@@ -443,7 +448,8 @@ class ReaderProvider extends ChangeNotifier {
     final end = (idx + 1 < pages.length)
         ? pages[idx + 1].startOffset
         : _chapterRanges[chapterIdx].endOffset;
-    return text.substring(offset, end);
+    // rtrim 去除尾部空白/换行，避免渲染溢出
+    return text.substring(offset, end).trimRight();
   }
 
   /// Returns the total number of pages in [chapterIndex] for the given mode.
