@@ -1,7 +1,8 @@
 #!/bin/bash
 # 精简编译脚本：排除 TTS/sano 模型资源（~84MB），减小 APK 体积便于远程传输
-# 用法: ./build_slim.sh [install]
-#   install: 传输到 Mac (10.10.164.90) 并安装到设备
+# 用法: ./build_slim.sh [install|install-local]
+#   install:      传输到 Mac (10.10.164.90) 并安装到设备
+#   install-local: 直接安装到本机连接的设备（需 adb 可用）
 
 set -e
 
@@ -31,6 +32,18 @@ if [ "$1" = "install" ]; then
     cat "$APK" | ssh tomac@10.10.164.90 "cat > /tmp/app-debug.apk"
     echo "=== 安装到设备 ==="
     ssh tomac@10.10.164.90 "/Users/tomac/Library/Android/sdk/platform-tools/adb install -r /tmp/app-debug.apk"
+elif [ "$1" = "install-local" ]; then
+    echo "=== 安装到本机设备 ==="
+    if ! command -v adb &> /dev/null; then
+        echo "错误: adb 未找到，请确保 Android SDK 已安装并在 PATH 中"
+        exit 1
+    fi
+    DEVICES=$(adb devices | grep -w "device$" | wc -l)
+    if [ "$DEVICES" -eq 0 ]; then
+        echo "错误: 未检测到已连接的设备"
+        exit 1
+    fi
+    adb install -r "$APK"
 fi
 
 echo "=== 完成 ==="

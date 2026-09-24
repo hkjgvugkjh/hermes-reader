@@ -1,5 +1,28 @@
 # ChangeLog
 
+## 2026-09-24（已实现 · 真机验证）
+- **修复段首全角空格（U+3000）缩进消失问题**。
+  根因：Flutter `TextAlign.justify` 会折叠每行行首的所有 `White_Space=Yes` 字符（包括
+  U+3000 全角空格），导致中文段首缩进完全消失。
+  调试过程：通过临时开关 `debugReplaceFullwidthSpace` 将 U+3000 替换为"口"，
+  确认文本中确实包含 U+3000，排除文本提取问题。
+  尝试方案（均无效）：
+  1. `cleanText` 保护-恢复（`\u0001` 占位符）→ 文本保留但渲染仍折叠
+  2. `WidgetSpan` + `SizedBox` 替代 U+3000 → justify 下仍被折叠
+  3. 替换为普通空格 U+0020 → justify 同样折叠
+  4. 替换为不换行空格 U+00A0 → 同上
+  最终方案：将 `TextAlign.justify` 改为 `TextAlign.left`，确保段首 U+3000
+  不被折叠，缩进正常显示。
+  真机验证（Huawei P10）：打开《元尊》→ 正文各行开头均有全角空格缩进。
+- **新增调试开关 `debugReplaceFullwidthSpace`**：ReaderConfig 新增布尔字段，
+  设置面板中添加"[调试] 全角空格→口"开关，用于排查段首缩进显示问题。
+- **新增精简编译脚本 `build_slim.sh`**：排除 TTS/sano 模型资源（~84MB），
+  APK 从 350MB 降至 249MB，支持 `install`（传输到 Mac）和 `install-local`（安装到本机）。
+- **修复 txt 文件换行符残留**：`cleanText` 使用保护-恢复方式处理 `\r\n`，
+  避免 `\r` 残留在行首导致字符异常。
+- **修复 `readerConfig` 序列化**：`toJson()`/`fromJson()` 新增
+  `debugReplaceFullwidthSpace` 字段，确保调试开关状态持久化。
+
 ## 2026-09-23（已修复 · 待真机验证）
 - **修复阅读页始终显示“没有可显示的内容”**。
   根因（连锁两处）：① `book_reader_screen` 用 `page == null` 作为是否渲染正文的

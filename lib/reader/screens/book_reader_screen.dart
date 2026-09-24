@@ -1052,20 +1052,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// [Text]。
   ///
   /// 段首连续 U+3000（全角空格）在 `TextAlign.justify` 下会被折叠为零宽，
-  /// 导致中文段首缩进消失。WidgetSpan 和普通空格 U+0020 在 justify 下同样
-  /// 被折叠。这里将段首 U+3000 替换为不换行空格 U+00A0（White_Space=No，
-  /// 不被 justify 折叠），保留缩进视觉效果。
+  /// 导致中文段首缩进消失。U+00A0、WidgetSpan 等方案在 justify 下同样被折叠。
+  /// 这里使用 `TextAlign.left` 替代 `TextAlign.justify`，确保段首缩进可见。
   Widget _buildTextSegment(String text, TextStyle style, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
-    // 检测段首连续 U+3000，替换为不换行空格 U+00A0
-    // U+00A0 的 White_Space=No，不会被 TextAlign.justify 折叠
-    // 每个 U+3000 替换为 2 个 U+00A0（宽度约 1em）
-    final indentMatch = RegExp(r'^(\u3000+)').firstMatch(text);
-    final indentCount = indentMatch?.group(1)?.length ?? 0;
-    if (indentCount > 0) {
-      final indentSpaces = '\u00A0\u00A0' * indentCount;
-      text = indentSpaces + text.substring(indentCount);
-    }
-
     // Pin textScaleFactor to 1.0 so the on-screen Text matches the paginator's
     // TextPainter measurement (which always uses 1.0). The app controls font
     // size via reader.config.fontSize, so letting the system font scaler apply
@@ -1074,7 +1063,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       return SelectableText(
         text,
         style: style,
-        textAlign: TextAlign.justify,
+        textAlign: TextAlign.left,
         textHeightBehavior: _kPageTextHeightBehavior,
         textScaler: TextScaler.linear(1.0),
         // onSelectionChanged 签名固定且需捕获本段局部状态，这里只做一行转发，
@@ -1082,7 +1071,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
         onSelectionChanged: onSelection == null ? null : (sel, _) => _reportSegmentSelection(sel, text, baseOffset, page, onSelection),
       );
     }
-    return Text(text, style: style, textAlign: TextAlign.justify, textHeightBehavior: _kPageTextHeightBehavior, textScaler: TextScaler.linear(1.0));
+    return Text(text, style: style, textAlign: TextAlign.left, textHeightBehavior: _kPageTextHeightBehavior, textScaler: TextScaler.linear(1.0));
   }
 
   /// 把单段文字上的划选结果换算成全书字符区间并上报给 [onSelection]。
