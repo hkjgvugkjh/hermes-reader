@@ -475,6 +475,81 @@ class ReaderProvider extends ChangeNotifier {
     return total;
   }
 
+  /// Whether background pagination is currently running.
+  bool get isGlobalPaginating => _globalPaginating;
+
+  /// Progress of background pagination: chapters completed / total chapters.
+  double get globalPaginationProgress {
+    if (_chapterRanges.isEmpty) return 0;
+    return _paginatedChapterCount / _chapterRanges.length;
+  }
+
+  /// Current chapter being paginated (for progress display).
+  int? _globalPaginatingChapterIndex;
+  bool _globalPaginating = false;
+  int _paginatedChapterCount = 0;
+
+  /// Paginates all chapters in the background, updating [totalBookPages] and
+  /// [chapterPageCount] as each chapter completes. Shows progress in the footer.
+  ///
+  /// If [updateCurrentChapter] is true and the current chapter is paginated,
+  /// the current chapter's page list is also refreshed.
+  Future<void> paginateAllChapters({
+    required TextStyle style,
+    required double maxWidth,
+    required double maxHeight,
+    required double nonFullscreenMaxHeight,
+    bool updateCurrentChapter = true,
+  }) async {
+    if (_chapterRanges.isEmpty || _globalPaginating) return;
+    _globalPaginating = true;
+    _paginatedChapterCount = 0;
+    _globalPaginatingChapterIndex = null;
+    notifyListeners();
+
+    for (var i = 0; i < _chapterRanges.length; i++) {
+      _globalPaginatingChapterIndex = i;
+      notifyListeners();
+      final range = _chapterRanges[i];
+      final text = _content?.text;
+      if (text == null) continue;
+
+      // Skip if already paginated (unless it's the current chapter and we need to update)
+      if (_chapterPages.containsKey(i) &&
+          !(updateCurrentChapter && i == currentChapterIndex)) {
+        _paginatedChapterCount++;
+        continue;
+      }
+
+      final info = await PaginatorService.paginateChapterIsolate(
+        text,
+        chapterIndex: i,
+        chapterTitle: i < _chapters.length
+            ? _chapters[i].title
+            : '章节 ${i + 1}',
+        chapterStartOffset: range.startOffset,
+        chapterEndOffset: range.endOffset,
+        style: style,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
+        nonFullscreenMaxHeight: nonFullscreenMaxHeight,
+        initialBatch: -1, // compute all pages
+      );
+
+      _chapterPages[i] = info;
+      _paginatedChapterCount++;
+      // Sync pages if this is the current chapter
+      if (updateCurrentChapter && i == currentChapterIndex) {
+        _syncPagesForMode(info, fullscreen: _isFullscreen);
+      }
+      notifyListeners();
+    }
+
+    _globalPaginating = false;
+    _globalPaginatingChapterIndex = null;
+    notifyListeners();
+  }
+
   /// Current page number across the whole book (1-based).
   ///
   /// Sum of pages in all chapters before [currentChapterIndex], plus the
@@ -652,6 +727,26 @@ class ReaderProvider extends ChangeNotifier {
       // let the next layout pass re-flow with the new boundaries.
       _viewportSig = '';
       notifyListeners();
+      // 章节检测完成后，触发全局分页：后台逐章计算总页数，更新 Z 值。
+      // 实际测量参数由阅读界面 LayoutBuilder 提供；此处先以章节单位估算，
+      // 待布局完成后按真实可视尺寸重新计算。
+      if (_chapterRanges.isNotEmpty && !_globalPaginating) {
+        final fontSize = ReaderConfig.baseFontSize * _config.fontScale;
+        final style = TextStyle(
+          fontSize: fontSize,
+          height: _config.lineHeightFactor,
+        );
+        // 延迟到下一帧，避免阻塞章节检测完成后的 UI 刷新
+        Future.delayed(Duration.zero, () {
+          paginateAllChapters(
+            style: style,
+            maxWidth: 400, // 占位值；真实值由阅读界面的 LayoutBuilder 覆盖
+            maxHeight: 400,
+            nonFullscreenMaxHeight: 300,
+            updateCurrentChapter: true,
+          );
+        });
+      }
     } catch (_) {
       _chapters = const [];
     }

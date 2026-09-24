@@ -611,6 +611,9 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                             : null,
                         globalPageIndex: reader.globalPageIndex,
                         totalBookPages: reader.totalBookPages,
+                        isGlobalPaginating: reader.isGlobalPaginating,
+                        globalPaginationProgress: reader.globalPaginationProgress,
+                        isFullscreen: _isFullscreen,
                       ),
                   ],
                 ),
@@ -1185,6 +1188,9 @@ class _ReaderFooter extends StatelessWidget {
     this.chapterTitle,
     this.globalPageIndex,
     this.totalBookPages,
+    this.isGlobalPaginating = false,
+    this.globalPaginationProgress = 0.0,
+    this.isFullscreen = false,
   });
 
   final int pageIndex;
@@ -1203,6 +1209,15 @@ class _ReaderFooter extends StatelessWidget {
 
   /// Total pages across all chapters (Z in X/Y/Z).
   final int? totalBookPages;
+
+  /// Whether background pagination is currently running.
+  final bool isGlobalPaginating;
+
+  /// Progress of background pagination: chapters completed / total chapters.
+  final double globalPaginationProgress;
+
+  /// Whether the reader is in fullscreen mode.
+  final bool isFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -1257,7 +1272,7 @@ class _ReaderFooter extends StatelessWidget {
                       const SizedBox(width: 4),
                       Text(
                         globalPageIndex != null && totalBookPages != null
-                            ? '$globalPageIndex / $pageCount / $totalBookPages'
+                            ? '${pageIndex + 1} / $pageCount / $totalBookPages'
                             : '${pageIndex + 1} / $pageCount',
                         style: footerStyle,
                       ),
@@ -1265,7 +1280,33 @@ class _ReaderFooter extends StatelessWidget {
                   ),
                 ),
               ),
-              const Spacer(),
+              // 非全屏状态下显示分页进度动画
+              if (!isFullscreen && isGlobalPaginating)
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Theme.of(context).colorScheme.primary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '分页中 ${(globalPaginationProgress * 100).toInt()}%',
+                          style: footerStyle.copyWith(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              if (!isFullscreen && !isGlobalPaginating) const Spacer(),
               IconButton(
                 icon: const Icon(Icons.chevron_left),
                 tooltip: '上一页',
@@ -1280,8 +1321,8 @@ class _ReaderFooter extends StatelessWidget {
                 tooltip: !canNarrate
                     ? '该格式不支持朗读'
                     : narrating
-                    ? '停止朗读'
-                    : '朗读',
+                        ? '停止朗读'
+                        : '朗读',
                 // Resuming from a saved offset is handled inside onNarrate.
                 onPressed: canNarrate ? () => onNarrate() : null,
               ),
