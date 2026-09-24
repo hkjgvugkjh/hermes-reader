@@ -454,6 +454,37 @@ class ReaderProvider extends ChangeNotifier {
     return pages.length;
   }
 
+  /// Total pages across all chapters.
+  ///
+  /// Chapters that have not been paginated yet are estimated as 1 page each
+  /// (every chapter has at least one page). When [ensureChapterPages] or
+  /// [computeRemainingChapterPages] finishes, the actual page count replaces
+  /// the estimate and [notifyListeners] fires so the footer updates.
+  int get totalBookPages {
+    var total = 0;
+    for (var i = 0; i < _chapterRanges.length; i++) {
+      final count = chapterPageCount(i, fullscreen: _isFullscreen);
+      total += count > 0 ? count : 1; // 未分页章节按 1 页估算
+    }
+    return total;
+  }
+
+  /// Current page number across the whole book (1-based).
+  ///
+  /// Sum of pages in all chapters before [currentChapterIndex], plus the
+  /// current page index within the chapter, plus 1. Unpaginated chapters
+  /// are estimated as 1 page each.
+  int get globalPageIndex {
+    final chapterIdx = currentChapterIndex;
+    if (chapterIdx < 0) return pageIndex + 1;
+    var offset = 0;
+    for (var i = 0; i < chapterIdx; i++) {
+      final count = chapterPageCount(i, fullscreen: _isFullscreen);
+      offset += count > 0 ? count : 1;
+    }
+    return offset + pageIndex + 1;
+  }
+
   /// Returns the character offset of the first page in [chapterIndex].
   int chapterStartOffset(int chapterIndex) {
     if (chapterIndex < 0 || chapterIndex >= _chapterRanges.length) return 0;

@@ -609,6 +609,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                         .title
                                   : null)
                             : null,
+                        globalPageIndex: reader.globalPageIndex,
+                        totalBookPages: reader.totalBookPages,
                       ),
                   ],
                 ),
@@ -1169,6 +1171,8 @@ class _ReaderFooter extends StatelessWidget {
     required this.onNarrate,
     required this.onJump,
     this.chapterTitle,
+    this.globalPageIndex,
+    this.totalBookPages,
   });
 
   final int pageIndex;
@@ -1181,6 +1185,12 @@ class _ReaderFooter extends StatelessWidget {
   final Future<void> Function() onNarrate;
   final VoidCallback onJump;
   final String? chapterTitle;
+
+  /// 1-based page number across the whole book (X in X/Y/Z).
+  final int? globalPageIndex;
+
+  /// Total pages across all chapters (Z in X/Y/Z).
+  final int? totalBookPages;
 
   @override
   Widget build(BuildContext context) {
@@ -1205,7 +1215,9 @@ class _ReaderFooter extends StatelessWidget {
             onTap: onJump,
             behavior: HitTestBehavior.opaque,
             child: LinearProgressIndicator(
-              value: pageCount > 1 ? progress : 1.0,
+              value: (globalPageIndex != null && totalBookPages != null && totalBookPages! > 1)
+                  ? globalPageIndex! / totalBookPages!
+                  : (pageCount > 1 ? progress : 1.0),
               minHeight: 6,
             ),
           ),
@@ -1231,7 +1243,12 @@ class _ReaderFooter extends StatelessWidget {
                         color: footerStyle.color,
                       ),
                       const SizedBox(width: 4),
-                      Text('${pageIndex + 1} / $pageCount', style: footerStyle),
+                      Text(
+                        globalPageIndex != null && totalBookPages != null
+                            ? '$globalPageIndex / $pageCount / $totalBookPages'
+                            : '${pageIndex + 1} / $pageCount',
+                        style: footerStyle,
+                      ),
                     ],
                   ),
                 ),
