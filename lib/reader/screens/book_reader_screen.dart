@@ -1052,16 +1052,17 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// [Text]。
   ///
   /// 段首连续 U+3000（全角空格）在 `TextAlign.justify` 下会被折叠为零宽，
-  /// 导致中文段首缩进消失。WidgetSpan 方案在 justify 下同样被折叠。
-  /// 这里将段首 U+3000 替换为两个普通空格 U+0020（普通空格有宽度且不被
-  /// justify 折叠），保留缩进视觉效果。
+  /// 导致中文段首缩进消失。WidgetSpan 和普通空格 U+0020 在 justify 下同样
+  /// 被折叠。这里将段首 U+3000 替换为不换行空格 U+00A0（White_Space=No，
+  /// 不被 justify 折叠），保留缩进视觉效果。
   Widget _buildTextSegment(String text, TextStyle style, int baseOffset, BookPage page, _SelectionCallback? onSelection) {
-    // 检测段首连续 U+3000，替换为等宽普通空格
+    // 检测段首连续 U+3000，替换为不换行空格 U+00A0
+    // U+00A0 的 White_Space=No，不会被 TextAlign.justify 折叠
+    // 每个 U+3000 替换为 2 个 U+00A0（宽度约 1em）
     final indentMatch = RegExp(r'^(\u3000+)').firstMatch(text);
     final indentCount = indentMatch?.group(1)?.length ?? 0;
     if (indentCount > 0) {
-      // 每个 U+3000 替换为 2 个普通空格（视觉宽度约等于一个全角空格）
-      final indentSpaces = '  ' * indentCount;
+      final indentSpaces = '\u00A0\u00A0' * indentCount;
       text = indentSpaces + text.substring(indentCount);
     }
 
