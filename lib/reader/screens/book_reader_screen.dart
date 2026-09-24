@@ -506,7 +506,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                             // [_buildPageBody] renders with, otherwise the
                             // measured page capacity is off and pages come out
                             // nearly empty.
-                            // Hand the paginator a box one half-line smaller than
+                            // Hand the paginator a box one full line smaller than
                             // the real render box, so even sub-pixel differences
                             // between TextPainter measurement and on-screen Text
                             // (and the trailing-newline blank line) never overflow.
@@ -518,7 +518,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                 height: reader.config.lineHeightFactor,
                               ),
                               maxWidth: maxW,
-                              maxHeight: maxH - margin * 0.5,
+                              maxHeight: maxH - margin,
                               fullscreen: _isFullscreen,
                             );
                           }
@@ -1099,12 +1099,24 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
   /// - 2*margin。分页器测量的盒子比这再小一个 safety 缓冲，所以即便渲染比
   /// 测量高几像素也绝不会溢出 Column。ClipRect 作为最终兜底裁掉任何溢出。
   Widget _wrapPagedColumn(List<Widget> widgets, TextStyle style, double? contentMaxHeight) {
-    final column = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: widgets);
+    final column = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: widgets,
+    );
 
     if (contentMaxHeight != null) {
       // 一行高度：与 LayoutBuilder 里传给分页器的 margin 完全一致。
       final margin = (style.fontSize ?? ReaderConfig.baseFontSize) * (style.height ?? 1.0);
-      return SizedBox(height: contentMaxHeight, child: ClipRect(child: Padding(padding: EdgeInsets.all(margin), child: column)));
+      return SizedBox(
+        height: contentMaxHeight,
+        child: ClipRect(
+          child: Padding(
+            padding: EdgeInsets.all(margin),
+            child: column,
+          ),
+        ),
+      );
     }
 
     // Fallback when no valid max height is available (page null or constraints
