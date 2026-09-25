@@ -365,6 +365,51 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 根因深挖 + 完整修复：系统侧有弹出但 APP「待处理事项」从不显示（四层根因）
+
+**日期**: 2026-09-25
+**现象**：Studio 会话弹出的确认/授权事件，系统（Studio Web UI / proxy）侧有广播，但 APP「待处理事项」列表从未出现任何条目。
+
+**沿链路逐层排查，发现四层独立根因（每一层都足以让事件丢失）：**
+
+### 根因 A（最关键，proxy 端）：`studio_adapter.handleSocketIO` 从不分发 Studio 事件
+- `handleFrame` 收到 Socket.IO 帧后调用 `handleSocketIO(frame[1:])`（已去掉首字符 `4`）。
+- 但 `handleSocketIO` 内部判断 `if pkt[0] == '4' && pkt[1] == '2'` —— 传入的 `pkt` 首字符已是 `2`（`42` 的第二个字符），条件**永远不成立**，所有 Studio 事件（clarify / auth / notification）被静默丢弃。
+- 证据：`/tmp/proxy.log` 中 `[studio] frame:` 有 8817 次，但 `dispatchEvent` 的 `[studio] event:` 日志出现 **0 次**（加 `[di-debug]` 验证：修复前 `broadcastDI mt=0x3b` 从未出现）。
+- **修复**（`hermes-proxy/internal/proxy/studio_adapter.go`）：`handleSocketIO(frame)` 传整帧，使 `pkt[0]=='4' && pkt[1]=='2'` 正确匹配。
+
+### 根因 B（reader 端协议解码）：hermes-shared 的 v2 二进制解码缺失
+- proxy v2 对 0x39/0x3B 用紧凑二进制（`EncodeAuthReqV2`/`EncodeEventV2`）编码；reader 端 `_decodePayload` 对 0x39/0x3B 在 v2 下错误地 `jsonDecode` 帧明文 → 解码失败被 `_onMessage` 的 catch 吞掉 → 事件流收不到。
+- **修复**（`hermes-shared`）：新增 `decodeDiAuthReq` / `decodeDiEvent`（与 proxy 字段 tag 一致：`fAuthReqSessionID/Prompt/Choices=1/2/3`，`fEventDirection/Name/Data=1/2/3`），并在 `_decodePayload` v2 分支对 0x39/0x3B 调用它们（JSON 兜底）。同步修复上行 `sendClarifyResponse` 在 v2 下用 `encodeDiEvent`（否则 clarify 响应上报失败）。
+
+### 根因 C（reader 端数据形状）：`_onDIEvent` 把嵌套 JSON 字符串当 Map 丢弃
+- proxy 把后端原始 `data` 作为**嵌套 JSON 字符串**塞进 `DIEventPayload.Data`；旧 `_onDIEvent` 在 `if (data is! Map) return;` 处直接丢弃。0x39 也缺 `req_id`（`if (reqId.isEmpty) return;` 丢弃全部 auth）。
+- **修复**（`session_provider.dart`）：`_onDIEvent` 兼容 `data` 为嵌套字符串（二次 `jsonDecode`）；`_onDIAuthRequest` 的 id 回退到 `${sessionId}_${prompt.hashCode}`，携带 `choices`。
+
+### 根因 D（reader 端依赖注入）：`_taskProvider` 从未被设置
+- `ProxyProvider<TaskProvider, void>` 的 `update` 时序不可靠，`_taskProvider` 实测为 **NULL** → `_onDIEvent`/`_onDIAuthRequest` 开头 `if (taskProvider == null) return;` 直接返回，`addTask` 永不执行。
+- 证据：真机日志 `[DI] _onDIEvent taskProvider=NULL`。
+- **修复**（`main.dart`）：在 `_onConnected` 设置 proxy client 后，显式 `sessionProvider.setTaskProvider(context.read<TaskProvider>())`（此时所有 provider 已就绪）。
+
+**验证（真机端到端，全部 ✅）**：
+- 修复 A 后：`[di-debug] broadcastDI mt=0x3b subscribers=1 bcID=185` 首次出现（此前 0 次）。
+- 修复 B/C/D 后真机日志：
+  ```
+  [DI] clarify.requested 解析: session=mu9uerb47m9bay clarifyId=62edfbf1...
+    question="下一步选 A 还是 B？" choices=[A (Recommended), B]
+  [DI] auth.request 解析: session= id=_803944495 prompt="Authentication invalid..." choices=[]
+  ```
+  即 clarify 与 auth 事件均成功 `addTask` 进入「待处理事项」列表。
+- `flutter analyze lib/main.dart lib/reader/providers/session_provider.dart` — 0 error / 0 warning。
+- `build_slim.sh install-local` — 构建并安装成功（含 hermes-shared 本地依赖重新编译）。
+
+**涉及仓库/提交**：
+- `hermes-application/hermes-proxy`：`studio_adapter.go` handleSocketIO 修复（+ di-debug 排查日志）。
+- `hermes-application/hermes-shared`：`binary_codec.dart`/`binary_messages.dart`/`proxy_client.dart` v2 解码（0x39/0x3B）+ 上行 encodeDiEvent。
+- `hermes-application/hermes-reader`：`session_provider.dart` 数据形状修复 + `main.dart` taskProvider 注入 + 旧模态对话框清理（前序提交）。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，

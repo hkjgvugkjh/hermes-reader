@@ -603,6 +603,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final sessionProvider = context.read<SessionProvider>();
       print('[ONCONNECTED] Setting proxy client...');
       sessionProvider.setProxyClient(proxyClient);
+      // 显式把 TaskProvider 注入 SessionProvider，避免 ProxyProvider 时序
+      // 导致 _taskProvider 为 null（那样 DI 事件不会被加入「待处理事项」）。
+      sessionProvider.setTaskProvider(context.read<TaskProvider>());
       print('[ONCONNECTED] Connecting proxy client...');
       await proxyClient.connect();
       print('[ONCONNECTED] Proxy client connected!');
