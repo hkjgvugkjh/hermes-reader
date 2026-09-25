@@ -405,30 +405,41 @@ class SessionProvider extends ChangeNotifier {
     final taskProvider = _taskProvider;
     if (taskProvider == null) return;
 
-    final reqId = (req['req_id'] ?? req['id'] ?? '').toString();
-    final serverId = (req['server_id'] ?? req['source'] ?? '').toString();
-    if (reqId.isEmpty) return;
-
+    // proxy 的 0x39 payload 形状为 {session_id, prompt, choices}，不含 req_id。
+    // 因此 id 回退到 (session_id + prompt) 组合，保证非空且基本唯一。
+    final sessionId = (req['session_id'] ?? req['source'] ?? '').toString();
     final prompt = (req['prompt'] ?? req['message'] ?? req['desc'] ?? '需要您确认')
         .toString();
+    final reqId = (req['req_id'] ?? req['id'] ?? '').toString();
+    final id = reqId.isNotEmpty
+        ? reqId
+        : '${sessionId}_${prompt.hashCode}';
+    if (id.isEmpty) return;
+
     final title = (req['title'] ??
             req['name'] ??
             (prompt.length > 20 ? prompt.substring(0, 20) : prompt))
         .toString();
-    // choices stored in task for clarify responses
+    final choicesRaw = req['choices'];
+    final List<String> choices = choicesRaw is List
+        ? choicesRaw.map((e) => e.toString()).toList()
+        : <String>[];
     final timeoutMs = req['timeout_ms'];
     final DateTime? timeoutAt = timeoutMs is int
         ? DateTime.now().add(Duration(milliseconds: timeoutMs))
         : null;
 
+    debugPrint('[DI] auth.request 解析: session=$sessionId id=$id prompt="$prompt" choices=$choices');
+
     final task = TaskItem(
-      id: reqId,
+      id: id,
       title: title,
       description: prompt,
-      serverId: serverId,
+      serverId: sessionId,
       createdAt: DateTime.now(),
       timeoutAt: timeoutAt,
       priority: TaskPriority.high,
+      choices: choices,
       resolved: false,
     );
     taskProvider.addTask(task);
@@ -444,22 +455,51 @@ class SessionProvider extends ChangeNotifier {
     final eventName = (event['event'] ?? '').toString();
     if (eventName != 'clarify.requested') return;
 
-    final data = event['data'];
-    if (data is! Map) return;
+    // proxy 下发的 data 字段可能是 Map（平铺）或嵌套 JSON 字符串
+    // （studio_adapter.go 把后端原始 data 作为字符串塞进 DIEventPayload.Data）。
+    // 两种形状都要兼容，否则任务永远不会进入「待处理事项」列表。
+    dynamic data = event['data'];
+    if (data is String) {
+      try {
+        data = jsonDecode(data);
+      } catch (_) {
+        debugPrint('[DI] clarify.requested data 非合法 JSON: $data');
+        return;
+      }
+    }
+    if (data is! Map) {
+      debugPrint('[DI] clarify.requested data 字段非 Map/JSON: ${data.runtimeType}');
+      return;
+    }
+    final dataMap = Map<String, dynamic>.from(data);
 
-    final sessionId = (data['session_id'] ?? '').toString();
-    final clarifyId = (data['clarify_id'] ?? '').toString();
-    final question = (data['question'] ?? '').toString();
-    final choicesRaw = data['choices'];
+    final sessionId = (dataMap['session_id'] ?? '').toString();
+    final clarifyId = (dataMap['clarify_id'] ??
+            dataMap['id'] ??
+            dataMap['clarify_id_str'] ??
+            '')
+        .toString();
+    final question = (dataMap['question'] ??
+            dataMap['text'] ??
+            dataMap['prompt'] ??
+            '')
+        .toString();
+    final choicesRaw = dataMap['choices'];
     final List<String> choices = choicesRaw is List
         ? choicesRaw.map((e) => e.toString()).toList()
         : <String>[];
-    final timeoutMs = data['timeout_ms'];
+    final timeoutMs = dataMap['timeout_ms'] ?? dataMap['timeout'];
     final DateTime? timeoutAt = timeoutMs is int
         ? DateTime.now().add(Duration(milliseconds: timeoutMs))
         : null;
 
-    if (clarifyId.isEmpty) return;
+    debugPrint('[DI] clarify.requested 解析: session=$sessionId '
+        'clarifyId=$clarifyId question="$question" choices=$choices');
+
+    if (clarifyId.isEmpty) {
+      debugPrint('[DI] clarify.requested 缺少 clarify_id，跳过');
+      return;
+    }
 
     // 仅以「待处理事项」列表形式呈现（点击进入显示详情、可选确认/拒绝），
     // 不再弹出模态对话框，避免打断阅读。

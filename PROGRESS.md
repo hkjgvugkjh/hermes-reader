@@ -344,6 +344,27 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 缺陷修复（根因）：系统侧有弹出但 APP「待处理事项」从未出现 — DI 事件 payload 形状不匹配导致静默丢弃
+
+**日期**: 2026-09-25
+**现象**：Studio 会话弹出的确认/授权事件，系统（proxy）侧有广播，但 APP「待处理事项」列表里一条都没有（之前能"弹出"靠的是已被移除的模态对话框，列表路径其实一直失效）。
+
+**根因（沿链路排查）**：
+1. **0x3B `clarify.requested`**：proxy (`studio_adapter.go:333`) 把后端原始事件 data 作为**嵌套 JSON 字符串**塞进 `DIEventPayload.Data`（`data` 字段是 string，非 Map）。reader `_onDIEvent` 旧代码 `final data = event['data']; if (data is! Map) return;` 因 `data` 是 String → 直接 `return`，任务**从未加入列表**。
+2. **0x39 授权请求**：proxy 的 `DIAuthReqPayload`（`di.go:175`）形状为 `{session_id, prompt, choices}`，**不含 `req_id`**。reader `_onDIAuthRequest` 旧代码 `final reqId = req['req_id'] ?? req['id']; if (reqId.isEmpty) return;` 因 proxy 不发 req_id → `reqId` 为空 → 直接 `return`，auth 授权请求**也从未加入列表**（`id` 字段被设为空导致丢弃）。
+
+**修复**（`lib/reader/providers/session_provider.dart`）：
+1. `_onDIEvent`：兼容 `data` 为嵌套 JSON 字符串（二次 `jsonDecode`）与 Map 两种形状；字段回退更稳（`clarify_id/id`、`question/text/prompt`、`timeout_ms/timeout`）；加 `debugPrint('[DI] clarify.requested 解析: ...')` 便于真机日志确认。
+2. `_onDIAuthRequest`：id 回退到 `${sessionId}_${prompt.hashCode}`（proxy 不发 req_id 时仍非空且基本唯一）；`serverId` 取 `session_id`（旧代码取 `req['server_id']` 恒为空）；携带 `choices` 字段；加 `debugPrint('[DI] auth.request 解析: ...')`。
+
+**验证**：
+- `flutter analyze lib/reader/providers/session_provider.dart` — 0 error / 0 warning。
+- `build_slim.sh install-local` — 构建并安装成功（249M）。
+- 独立仿真 `scripts/verify_di_event_parse.dart`（dart 运行）：构造 proxy 真实的三种 payload（0x3B 嵌套字符串、0x39 无 req_id、0x3B 平铺 Map）喂入修复后的解析分支，断言 3 条任务全部进入列表 → **全部断言通过 ✅**。
+- 真机端到端：后台 `adb logcat` 监听 `[DI]` 日志（见 `/tmp/di_verify.log`），等下次真实会话事件触发时确认 `[DI] clarify.requested 解析` / `[DI] auth.request 解析` 打印、列表出现对应条目。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，
