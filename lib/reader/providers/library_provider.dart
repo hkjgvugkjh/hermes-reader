@@ -387,6 +387,7 @@ class ReaderProvider extends ChangeNotifier {
     );
 
     _chapterPages[chapterIndex] = info;
+    _chapterComplete.add(chapterIndex); // 标记该章已完整分页，避免重复补全
     _syncPagesForMode(info, fullscreen: _isFullscreen);
     notifyListeners();
   }
@@ -957,21 +958,58 @@ class ReaderProvider extends ChangeNotifier {
 
     // 由真实布局尺寸推导每页估算字符数（CJK 1em 宽、行高固定），
     // 供未测量章节的总页数估算使用，使 totalBookPages(Z) 即时合理。
+    // 注意：Flutter LayoutBuilder 在首帧/动画过渡时会回调若干次瞬时异常
+    // 尺寸（footer 未展开、安全区未计入等），若某次瞬时调用把 cpp 污染成
+    // 极小值，Z 会暴涨到十几万。因此：(1) 行列数必须达到合理下限才接受；
+    // (2) 取所有有效调用的最大值——瞬时收缩只会让 cpp 变小，取 max 可保证
+    // Z 永不因瞬时布局而暴涨。
     if (maxWidth > 0 && maxHeight > 0 && style.fontSize != null && style.height != null) {
       final fs = style.fontSize!;
       final lh = (style.height! * fs);
       if (lh > 0) {
         final cols = (maxWidth / fs).floor();
         final rows = (maxHeight / lh).floor();
-        final cpp = (cols * rows);
-        if (cpp > 0) _estimatedCharsPerPage = cpp.toDouble();
+        // 一页至少应容纳数行数，否则视为 transient 异常布局，直接跳过。
+        if (cols >= 3 && rows >= 3) {
+          final cpp = (cols * rows).toDouble();
+          if (_estimatedCharsPerPage <= 0 || cpp > _estimatedCharsPerPage) {
+            _estimatedCharsPerPage = cpp;
+          }
+        }
       }
     }
 
-    // Lazy, per-chapter pagination: only the chapter being read is paginated,
-    // and only its opening pages (see [_paginateChapter]). Paging the whole
-    // book up-front took minutes on large books — this keeps opening instant.
-    await _paginateChapter(_currentChapterIndex(), initialBatch: 5);
+    final ch = _currentChapterIndex();
+    // 已分页检查：当前章若已经过分页（无论完整与否），绝不再跑 batch=5——
+    // 那会把已加载/已补全的页数重置成 5。直接同步已有页面；若尚未完整
+    // （truncated）则异步补全剩余页。满足"执行初步分页前检查是否已分页成功"。
+    if (_chapterPages.containsKey(ch)) {
+      debugPrint('[pag] syncViewport ch=$ch 已分页，直接同步现有页（跳过 batch=5）');
+      _syncPagesForMode(_chapterPages[ch]!, fullscreen: _isFullscreen);
+      notifyListeners();
+      if (!_chapterComplete.contains(ch)) {
+        debugPrint('[pag] syncViewport ch=$ch 未完整，异步补全剩余页');
+        _paginateChapter(ch, initialBatch: -1)
+            .catchError((e) => debugPrint('[pag] 补全当前章失败: $e'));
+      }
+      return;
+    }
+
+    // Lazy, per-chapter pagination: only the FIRST time a chapter is read do we
+    // compute its opening pages (see [_paginateChapter]). Subsequent layout
+    // passes (footer animation, safe-area changes) must NOT re-run batch=5 —
+    // that would reset Y to 5 pages. Paging the whole book up-front took minutes
+    // on large books, so this keeps opening instant.
+    await _paginateChapter(ch, initialBatch: 5);
+
+    // 首次初步分页完成后，当前章未完整（truncated）则异步补全剩余页，
+    // 使 Y（当前章节总页数）变为真实值，而非停留在 5 页。
+    // 不 await：避免阻塞首屏渲染，补全结果通过 notifyListeners 推送到 UI。
+    if (!_chapterComplete.contains(ch) && _chapterPages.containsKey(ch)) {
+      debugPrint('[pag] syncViewport ch=$ch 首次初步分页完成，异步补全当前章剩余页');
+      _paginateChapter(ch, initialBatch: -1)
+          .catchError((e) => debugPrint('[pag] 补全当前章失败: $e'));
+    }
   }
 
   /// Paginates [chapterIndex] into [_pages] with the cached layout geometry.
@@ -1070,6 +1108,24 @@ class ReaderProvider extends ChangeNotifier {
       } else {
         _pageIndex = 0;
       }
+
+      // 把本次分页结果缓存进 _chapterPages，使后续 syncViewportChars 能通过
+      // “已分页”守卫跳过 batch=5（否则每次布局抖动都会把 Y 重置成 5 页），
+      // 也让 totalBookPages(Z) 对本章取真实页数。fullscreen 与 notFullScreen
+      // 两套页面按需分别缓存：当前模式写真实列表，另一模式继承上次的（若有）。
+      final pageEntries = entries
+          .map((e) => PageEntry(pageIndex: e.pageIndex, startOffset: e.startOffset))
+          .toList();
+      final prev = _chapterPages[chapterIndex];
+      _chapterPages[chapterIndex] = ChapterPageInfo(
+        chapterIndex: chapterIndex,
+        chapterTitle: prev?.chapterTitle ?? '',
+        startOffset: _chapterRanges[chapterIndex].startOffset,
+        fullScreenPages:
+            _isFullscreen ? pageEntries : (prev?.fullScreenPages ?? const []),
+        notFullScreenPages:
+            _isFullscreen ? (prev?.notFullScreenPages ?? const []) : pageEntries,
+      );
     } catch (e) {
       // Never leave the reader stuck on the spinner: fall back to the
       // character-based pages so the book stays readable.

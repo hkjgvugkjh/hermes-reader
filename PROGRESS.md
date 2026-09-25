@@ -250,6 +250,36 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 缺陷修复：章节总页数 Y 恒为 5、全书总页数 Z 暴涨到 159879
+
+**日期**: 2026-09-25
+**现象**：修复首屏卡死后，阅读页页码变成 `X / 5 / 159879`——当前章节总页数（Y）永远停在 5，全书总页数（Z）暴涨到 159879（正常应为 ~14970），且 Z 数字明显不对。用户要求“执行初步分页前要检查是否已分页成功”。
+
+**根因（两个独立 bug）**：
+
+1. **Y 恒为 5 的根因——`_paginateChapter` 从不缓存分页结果**：
+   旧 `_paginateChapter`（含 batch=5 与 batch=-1）只把结果写进临时 `_pages`，**从不写入 `_chapterPages[ch]`**。而 `syncViewportChars` 的“已分页”守卫依赖 `_chapterPages.containsKey(ch)`，永远为 false，于是每次 `LayoutBuilder` 因 footer 动画 / 安全区变化导致 `maxHeight` 在 436↔461 抖动（每次都改变 `_viewportSig`）都会**重跑 batch=5，把 Y 重新刷回 5 页**。异步补全原本走 `computeRemainingChapterPages`，但它也依赖 `_chapterPages.containsKey` 作 guard（永远 false → 提前 return），且内部调的是另一套 `paginateChapterIsolate` 还抛异常，于是当前章永远停在 batch=5 的 5 页，Y 修不正。
+
+2. **Z 暴涨到 159879 的根因——估算值被瞬时异常布局污染**：
+   `syncViewportChars` 每次布局都**无条件**用 `cols*rows` 覆盖 `_estimatedCharsPerPage`（每页字符数）。`LayoutBuilder` 在首帧 / 动画过渡时会回调若干次**瞬时异常小尺寸**（footer 未展开、安全区未计入），某次把 `cpp` 污染成极小值（≈25），于是 `Z = 4111030 / 25 ≈ 159879` 暴涨。
+
+**修复**：
+
+1. **`_paginateChapter` 写入 `_chapterPages`**：分页完成后把 `entries` 映射成 `ChapterPageInfo` 缓存（`fullscreen` / `notFullScreen` 两套分页分别缓存，当前模式写真实列表、另一模式继承上次）。`initialBatch<0 || !truncated` 时照旧加 `_chapterComplete`。这样“已分页”守卫生效，后续布局抖动**跳过 batch=5**，Y 不再被刷回 5。
+2. **`syncViewportChars` 守卫改为“已分页即跳过 batch=5”**：以 `_chapterPages.containsKey(ch)` 判据——已分页过的章直接 `_syncPagesForMode` 同步现有页，未完整则**异步**补全（改用已验证可用的 `_paginateChapter(ch, initialBatch:-1)`，不再用会抛异常的 `computeRemainingChapterPages`）。只有“从未分页过的章”才首次跑 batch=5。
+3. **`_estimatedCharsPerPage` 取有效最大值**：只在 `cols>=3 && rows>=3`（排除瞬时异常小尺寸）时才接受该次估算，且取所有有效调用的**最大值**（瞬时收缩只会让 cpp 变小，取 max 保证 Z 永不因瞬时布局而暴涨）。
+4. （附带）`computeRemainingChapterPages` 补全成功后补 `_chapterComplete.add(ch)`，避免重复补全。
+
+**验证（真机 PCT AL10, Android 10 日志）**：
+
+- Y 修复：`ch=1` 首次 `batch=5` 后异步 `batch=-1` 补全返回 `entries=23 truncated=false`（当前章真实页数=23，不再是 5）；后续布局抖动（h=436/461/610）全部打印 `[pag] syncViewport ch=1 已分页，直接同步现有页（跳过 batch=5）`，Y 稳定为 23，不再刷回 5。
+- Z 修复：临时打印 `totalBookPages` 验证，Z 从布局过渡期的 1→14226→6 抖动后**稳定在 14970**，`estimatedCpp=289.0`（即每页 289 字符，305.6×436/(17×26.4) 合理），不再暴涨到 159879。临时调试打印已移除。
+- `flutter analyze` — 0 error；`build_slim.sh install-local` — 构建并安装成功（249M）。
+
+**未覆盖**：受 Canvas 渲染 UI 限制，无法自动点击打开书做实时 UI 截图；Z/Y 数值已通过日志与临时打印验证。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，
