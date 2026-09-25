@@ -71,7 +71,32 @@ class _SessionMonitorScreenState extends State<SessionMonitorScreen> {
               IconButton(
                 icon: const Icon(Icons.delete_sweep),
                 tooltip: '清空事件',
-                onPressed: provider.clearHistory,
+                onPressed: () async {
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (dialogContext) => AlertDialog(
+                      title: const Text('清空事件'),
+                      content: Text(
+                        '确定要清空全部 ${provider.recentChanges.length} 条监控事件吗？此操作不可撤销。',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(dialogContext).pop(false),
+                          child: const Text('取消'),
+                        ),
+                        FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.red,
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () => Navigator.of(dialogContext).pop(true),
+                          child: const Text('清空'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (ok == true && mounted) provider.clearHistory();
+                },
               ),
             ],
           ),
