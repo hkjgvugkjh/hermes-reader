@@ -614,6 +614,8 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         isGlobalPaginating: reader.isGlobalPaginating,
                         globalPaginationProgress: reader.globalPaginationProgress,
                         isFullscreen: _isFullscreen,
+                        paginatedChapterCount: reader.paginatedChapterCount,
+                        totalChapterCount: reader.totalChapterCount,
                       ),
                   ],
                 ),
@@ -1191,6 +1193,8 @@ class _ReaderFooter extends StatelessWidget {
     this.isGlobalPaginating = false,
     this.globalPaginationProgress = 0.0,
     this.isFullscreen = false,
+    this.paginatedChapterCount = 0,
+    this.totalChapterCount = 0,
   });
 
   final int pageIndex;
@@ -1218,6 +1222,12 @@ class _ReaderFooter extends StatelessWidget {
 
   /// Whether the reader is in fullscreen mode.
   final bool isFullscreen;
+
+  /// Number of chapters already paginated (for progress display).
+  final int paginatedChapterCount;
+
+  /// Total number of chapters in the book (for progress display).
+  final int totalChapterCount;
 
   @override
   Widget build(BuildContext context) {
@@ -1280,32 +1290,6 @@ class _ReaderFooter extends StatelessWidget {
                   ),
                 ),
               ),
-              // 非全屏状态下显示分页进度动画
-              if (!isFullscreen && isGlobalPaginating)
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              Theme.of(context).colorScheme.primary,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          '分页中 ${(globalPaginationProgress * 100).toInt()}%',
-                          style: footerStyle.copyWith(fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
               if (!isFullscreen && !isGlobalPaginating) const Spacer(),
               IconButton(
                 icon: const Icon(Icons.chevron_left),
@@ -1334,6 +1318,29 @@ class _ReaderFooter extends StatelessWidget {
             ],
           ),
         ),
+        // 非全屏状态下显示分页进度动画（独立行，避免 Row 挤压溢出）
+        if (!isFullscreen && isGlobalPaginating)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '[分页中] ${(globalPaginationProgress * 100).toInt()}% ($paginatedChapterCount/$totalChapterCount)',
+                    style: footerStyle.copyWith(fontSize: 12),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }

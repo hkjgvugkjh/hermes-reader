@@ -484,6 +484,12 @@ class ReaderProvider extends ChangeNotifier {
     return _paginatedChapterCount / _chapterRanges.length;
   }
 
+  /// Number of chapters already paginated (for progress display).
+  int get paginatedChapterCount => _paginatedChapterCount;
+
+  /// Total number of chapters in the book (for progress display).
+  int get totalChapterCount => _chapterRanges.length;
+
   /// Current chapter being paginated (for progress display).
   int? _globalPaginatingChapterIndex;
   bool _globalPaginating = false;
@@ -491,6 +497,10 @@ class ReaderProvider extends ChangeNotifier {
 
   /// Paginates all chapters in the background, updating [totalBookPages] and
   /// [chapterPageCount] as each chapter completes. Shows progress in the footer.
+  ///
+  /// Uses [initialBatch] = 5 for fast first pass: each chapter computes only
+  /// the first 5 pages quickly, so the progress bar moves within seconds.
+  /// Subsequent pages are computed incrementally as the user pages through.
   ///
   /// If [updateCurrentChapter] is true and the current chapter is paginated,
   /// the current chapter's page list is also refreshed.
@@ -507,37 +517,60 @@ class ReaderProvider extends ChangeNotifier {
     _globalPaginatingChapterIndex = null;
     notifyListeners();
 
-    for (var i = 0; i < _chapterRanges.length; i++) {
+    final totalChapters = _chapterRanges.length;
+    final stopwatch = Stopwatch()..start();
+    debugPrint('[分页] 开始全局分页: $totalChapters 章, maxWidth=$maxWidth, maxHeight=$maxHeight');
+
+    for (var i = 0; i < totalChapters; i++) {
       _globalPaginatingChapterIndex = i;
       notifyListeners();
       final range = _chapterRanges[i];
       final text = _content?.text;
-      if (text == null) continue;
+      if (text == null) {
+        debugPrint('[分页] 第 $i 章: text 为空，跳过');
+        continue;
+      }
 
       // Skip if already paginated (unless it's the current chapter and we need to update)
       if (_chapterPages.containsKey(i) &&
           !(updateCurrentChapter && i == currentChapterIndex)) {
         _paginatedChapterCount++;
+        debugPrint('[分页] 第 $i 章: 已分页，跳过 (${_paginatedChapterCount}/$totalChapters)');
         continue;
       }
 
-      final info = await PaginatorService.paginateChapterIsolate(
-        text,
-        chapterIndex: i,
-        chapterTitle: i < _chapters.length
-            ? _chapters[i].title
-            : '章节 ${i + 1}',
-        chapterStartOffset: range.startOffset,
-        chapterEndOffset: range.endOffset,
-        style: style,
-        maxWidth: maxWidth,
-        maxHeight: maxHeight,
-        nonFullscreenMaxHeight: nonFullscreenMaxHeight,
-        initialBatch: -1, // compute all pages
-      );
+      // 快速模式：每章只计算前 5 页，进度条能快速走完
+      final chapterStopwatch = Stopwatch()..start();
+      debugPrint('[分页] 第 $i 章: 开始分页 (offset=${range.startOffset}-${range.endOffset})');
+      ChapterPageInfo info;
+      try {
+        info = await PaginatorService.paginateChapterIsolate(
+          text,
+          chapterIndex: i,
+          chapterTitle: i < _chapters.length
+              ? _chapters[i].title
+              : '章节 ${i + 1}',
+          chapterStartOffset: range.startOffset,
+          chapterEndOffset: range.endOffset,
+          style: style,
+          maxWidth: maxWidth,
+          maxHeight: maxHeight,
+          nonFullscreenMaxHeight: nonFullscreenMaxHeight,
+          initialBatch: 5, // 快速计算前 5 页，后续按需补全
+        );
+      } catch (e) {
+        // 单章分页失败不阻塞整体流程，跳过该章
+        debugPrint('[分页] 第 $i 章: 分页失败，跳过: $e');
+        _paginatedChapterCount++;
+        notifyListeners();
+        continue;
+      }
+      chapterStopwatch.stop();
 
       _chapterPages[i] = info;
       _paginatedChapterCount++;
+      final pageCount = info.fullScreenPages.length;
+      debugPrint('[分页] 第 $i 章: 完成, $pageCount 页, 耗时 ${chapterStopwatch.elapsedMilliseconds}ms (${_paginatedChapterCount}/$totalChapters)');
       // Sync pages if this is the current chapter
       if (updateCurrentChapter && i == currentChapterIndex) {
         _syncPagesForMode(info, fullscreen: _isFullscreen);
@@ -545,6 +578,8 @@ class ReaderProvider extends ChangeNotifier {
       notifyListeners();
     }
 
+    stopwatch.stop();
+    debugPrint('[分页] 全局分页完成: $totalChapters 章, 总耗时 ${stopwatch.elapsedMilliseconds}ms');
     _globalPaginating = false;
     _globalPaginatingChapterIndex = null;
     notifyListeners();
@@ -730,22 +765,31 @@ class ReaderProvider extends ChangeNotifier {
       // 章节检测完成后，触发全局分页：后台逐章计算总页数，更新 Z 值。
       // 实际测量参数由阅读界面 LayoutBuilder 提供；此处先以章节单位估算，
       // 待布局完成后按真实可视尺寸重新计算。
+      debugPrint('[分页] _detectChapters 完成, ${_chapterRanges.length} 章, 准备触发全局分页');
       if (_chapterRanges.isNotEmpty && !_globalPaginating) {
         final fontSize = ReaderConfig.baseFontSize * _config.fontScale;
         final style = TextStyle(
           fontSize: fontSize,
           height: _config.lineHeightFactor,
         );
+        debugPrint('[分页] 触发 paginateAllChapters: maxWidth=400, maxHeight=400');
         // 延迟到下一帧，避免阻塞章节检测完成后的 UI 刷新
         Future.delayed(Duration.zero, () {
+          debugPrint('[分页] Future.delayed 回调执行, 开始调用 paginateAllChapters');
           paginateAllChapters(
             style: style,
             maxWidth: 400, // 占位值；真实值由阅读界面的 LayoutBuilder 覆盖
             maxHeight: 400,
             nonFullscreenMaxHeight: 300,
             updateCurrentChapter: true,
-          );
+          ).then((_) {
+            debugPrint('[分页] paginateAllChapters 完成');
+          }).catchError((e) {
+            debugPrint('[分页] paginateAllChapters 错误: $e');
+          });
         });
+      } else {
+        debugPrint('[分页] 跳过全局分页: ranges=${_chapterRanges.length}, paginating=$_globalPaginating');
       }
     } catch (_) {
       _chapters = const [];

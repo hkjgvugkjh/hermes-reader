@@ -1,5 +1,6 @@
 import 'dart:isolate';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 
 import '../models/book.dart';
 import '../models/chapter_page_info.dart';
@@ -430,7 +431,32 @@ class PaginatorService {
       nonFullscreenMaxHeight: nonFullscreenMaxHeight,
       initialBatch: initialBatch,
     );
-    return Isolate.run(() => _paginateChapterInIsolate(params));
+    debugPrint('[分页] 第 $chapterIndex 章: 调用 paginateChapter (主 isolate, maxWidth=$maxWidth, maxHeight=$maxHeight, batch=$initialBatch)');
+    final sw = Stopwatch()..start();
+    try {
+      // 在主 isolate 中执行：TextPainter 需要 root isolate 的字体资源
+      // 使用 initialBatch=5 快速计算前几页，后续按需补全
+      final service = PaginatorService();
+      final result = service.paginateChapter(
+        params.text,
+        chapterIndex: params.chapterIndex,
+        chapterTitle: params.chapterTitle,
+        chapterStartOffset: params.chapterStartOffset,
+        chapterEndOffset: params.chapterEndOffset,
+        style: TextStyle(fontSize: params.fontSize, height: params.heightFactor),
+        maxWidth: params.maxWidth,
+        maxHeight: params.maxHeight,
+        nonFullscreenMaxHeight: params.nonFullscreenMaxHeight,
+        initialBatch: params.initialBatch,
+      );
+      sw.stop();
+      debugPrint('[分页] 第 $chapterIndex 章: paginateChapter 完成, ${result.fullScreenPages.length} 页, 耗时 ${sw.elapsedMilliseconds}ms');
+      return result;
+    } catch (e, st) {
+      sw.stop();
+      debugPrint('[分页] 第 $chapterIndex 章: paginateChapter 错误 (${sw.elapsedMilliseconds}ms): $e\n$st');
+      rethrow;
+    }
   }
 
   /// Full-book chapter scan: returns each chapter's offset range.
