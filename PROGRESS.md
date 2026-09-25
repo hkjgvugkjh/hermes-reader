@@ -307,6 +307,22 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 缺陷修复：分页状态栏改为“当前页/全书总页数”，消除错误的“5页”
+
+**日期**: 2026-09-25
+**现象**：状态栏显示 `2/5/14967`——中间“5”是第一章节首次分页未完成时的临时 batch=5 章页数（chapterPageCount），第一章尚未补全时显示成错误的“5页”；用户要求改为“当前页/全书总页数”。
+
+**根因**：`_ReaderFooter` 页码显示串为 `${pageIndex+1} / $pageCount / $totalBookPages`（当前章内页 / 本章页 / 全书页）。其中 `$pageCount`（=_pages.length）在章节分页未完成时仅 batch=5 的临时值，第一章因此显示成“5”，且语义上“本章页数 Y”在懒分页下本就无稳定含义。
+
+**修复**：footer 页码显示改为只显示 **`$globalPageIndex / $totalBookPages`**（当前页用全书累计 1-based 页码 / 全书总页数 Z）。`globalPageIndex` 已是含章节偏移的 1-based 全书累计页码（`_chapterPagesCount` 对未分页章用字符估算，与 Z 口径一致）。不再显示单独的本章页数，因此“5”这类临时值彻底消失。
+
+**验证**：
+- 独立 Dart 脚本复刻 `globalPageIndex` 公式与 footer 显示串：第2章第1页→`21/43`、第1章末页→`20/43`、第2章末页→`43/43`，断言全部通过，格式确为“当前页(全书累计)/全书总页数”。
+- `flutter analyze` — 0 error；`build_slim.sh install-local` — 构建并安装成功（249M）。
+- 真机因 Canvas UI 无法自动进书截图，但通过代码审查确认 footer 文本构造已变更、不再引用 `pageCount` 作中间项。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，

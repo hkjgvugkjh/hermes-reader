@@ -1292,8 +1292,11 @@ class _ReaderFooter extends StatelessWidget {
                       ),
                       const SizedBox(width: 4),
                       Text(
+                        // 显示“当前页(全书累计)/全书总页数”，不再显示单独的本章页数
+                        // （本章页数在首次分页未完成时仅为 batch=5 的临时值，会显示成
+                        // 错误的“5”）。globalPageIndex 已是 1-based 全书累计页码。
                         globalPageIndex != null && totalBookPages != null
-                            ? '${pageIndex + 1} / $pageCount / $totalBookPages'
+                            ? '$globalPageIndex / $totalBookPages'
                             : '${pageIndex + 1} / $pageCount',
                         style: footerStyle,
                       ),
