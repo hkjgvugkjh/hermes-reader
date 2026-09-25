@@ -20,7 +20,14 @@ class TaskListScreen extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.delete_sweep),
             tooltip: '清空',
-            onPressed: taskProvider.clear,
+            onPressed: () async {
+              final ok = await _confirmDelete(
+                context,
+                '清空待处理事项',
+                '确定要清空全部 ${taskProvider.tasks.length} 项待处理事项吗？此操作不可撤销。',
+              );
+              if (ok && context.mounted) taskProvider.clear();
+            },
           ),
         ],
       ),
@@ -144,7 +151,17 @@ class _TaskTile extends StatelessWidget {
         trailing: task.resolved
             ? IconButton(
                 icon: const Icon(Icons.delete, size: 20),
-                onPressed: () => context.read<TaskProvider>().remove(task.id),
+                tooltip: '删除',
+                onPressed: () async {
+                  final ok = await _confirmDelete(
+                    context,
+                    '删除事项',
+                    '确定要删除「${task.title}」吗？此操作不可撤销。',
+                  );
+                  if (ok && context.mounted) {
+                    context.read<TaskProvider>().remove(task.id);
+                  }
+                },
               )
             : IconButton(
                 icon: const Icon(Icons.open_in_new, size: 20),
@@ -284,4 +301,35 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
       ],
     );
   }
+}
+
+/// Asks the user to confirm an irreversible delete action.
+/// Returns true only when the user taps 删除.
+Future<bool> _confirmDelete(
+  BuildContext context,
+  String title,
+  String content,
+) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: Text(content),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Colors.red,
+            foregroundColor: Colors.white,
+          ),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+  return result == true;
 }
