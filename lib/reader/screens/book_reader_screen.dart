@@ -549,7 +549,11 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                                 if (reader.config.tapZoneMode ==
                                         TapZoneMode.thirds &&
                                     reader.isToggleZone(fraction)) {
-                                  setState(() => _isFullscreen = false);
+                                  // 退出全屏：调用 provider 真正重载内容（失效缓存+重分页）
+                                  reader.toggleFullscreen();
+                                  setState(
+                                    () => _isFullscreen = reader.isFullscreen,
+                                  );
                                 } else {
                                   reader.handleTap(fraction);
                                 }
@@ -560,7 +564,11 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                               if (reader.config.tapZoneMode ==
                                       TapZoneMode.thirds &&
                                   reader.isToggleZone(fraction)) {
-                                setState(() => _isFullscreen = true);
+                                // 进入全屏：调用 provider 真正重载内容（失效缓存+重分页）
+                                reader.toggleFullscreen();
+                                setState(
+                                  () => _isFullscreen = reader.isFullscreen,
+                                );
                                 return;
                               }
 
@@ -591,8 +599,10 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         },
                       ),
                     ),
-                    if (_controlsVisible && !_isFullscreen)
-                      _ReaderFooter(
+                    if (_controlsVisible || _isFullscreen)
+                      Container(
+                        color: _isFullscreen ? Colors.black54 : null,
+                        child: _ReaderFooter(
                         pageIndex: reader.pageIndex,
                         pageCount: reader.pageCount,
                         progress: reader.progress,
@@ -617,6 +627,7 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
                         paginatedChapterCount: reader.paginatedChapterCount,
                         totalChapterCount: reader.totalChapterCount,
                       ),
+                    ),
                   ],
                 ),
         );
@@ -1235,7 +1246,7 @@ class _ReaderFooter extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (chapterTitle != null)
+        if (chapterTitle != null && !isFullscreen)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
             child: Text(
@@ -1290,7 +1301,7 @@ class _ReaderFooter extends StatelessWidget {
                   ),
                 ),
               ),
-              if (!isFullscreen && !isGlobalPaginating) const Spacer(),
+              if (!isGlobalPaginating) const Spacer(),
               IconButton(
                 icon: const Icon(Icons.chevron_left),
                 tooltip: '上一页',

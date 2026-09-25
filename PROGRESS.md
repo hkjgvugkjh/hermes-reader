@@ -280,6 +280,33 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 缺陷修复：全屏模式缺状态栏 + 切换时仅改区域不重载内容
+
+**日期**: 2026-09-25
+**需求**：为全屏模式增加同样的状态栏（显示页码码 X/Y/Z、进度等）；全屏↔非全屏切换时显示内容需重新加载，不能只是显示区域变化。后续补充：全屏模式不显示章节标题（“第N章”字样）。
+
+**根因**：
+- UI 全屏切换用 `setState(() => _isFullscreen = ...)`（screen 自己的字段），**从未调用 `ReaderProvider.toggleFullscreen()`**，导致 provider 内部的 `_isFullscreen` 永远是 `false`，`_chapterPages` 从没存过 fullscreen 模式页。
+- 全屏模式下 `appBar: null` 且 `_ReaderFooter` 被 `!_isFullscreen` 条件隐藏 → 全屏无任何状态栏，页码/进度/码全部看不到。
+- provider 旧 `toggleFullscreen` 只 `_syncPagesForMode` 复用已缓存页，未失效 `_viewportSig`，切换后 LayoutBuilder 因签名未变可能不重算 → 用户感知为“只是显示区域变化，内容未真正重载”。
+- `_ReaderFooter` 章节标题行 `if (chapterTitle != null)` 全屏也显示“第N章”。
+
+**修复**：
+
+1. **全屏状态栏（底部常驻半透明条）**：`_ReaderFooter` 渲染条件由 `if (_controlsVisible && !_isFullscreen)` 改为 `if (_controlsVisible || _isFullscreen)`；全屏时外包 `Container(color: Colors.black54)` 半透明背景常驻显示。复用同一 `_ReaderFooter`，显示 `X / Y / Z` + 进度条 + 翻页/朗读按钮。footer 内 `Spacer()` 条件由 `!isFullscreen && !isGlobalPaginating` 放宽为 `!isGlobalPaginating`，保证全屏时翻页/朗读按钮靠右布局不挤左。
+2. **切换改用 provider 真正重载**：全屏切换点（中心点击 thirds 模式 toggle 区）由 `setState(() => _isFullscreen = ...)` 改为 `reader.toggleFullscreen()` + `setState(() => _isFullscreen = reader.isFullscreen)`（UI 字段与 provider 真源同步）。
+3. **provider `toggleFullscreen` 失效缓存并重分页**：切换 `_isFullscreen` 后 `_viewportSig = ''`（强制下次 `syncViewportChars` 重算）；若另一模式已缓存则 `_syncPagesForMode` 直接切，否则 `_chapterComplete.remove(ch)` 等 LayoutBuilder 重新测量。满足“切换时重新加载内容而非仅改区域”。
+4. **全屏不显示章节标题**：`_ReaderFooter` 标题行条件加 `&& !isFullscreen`。
+
+**验证（真机 PCT AL10, Android 10 日志）**：
+- 全屏切换后 `syncViewport` 重新触发分页（fullscreen 参数随布局变化传入），当前章走 `batch=5` → 异步 `batch=-1` 补全，Y 重新计算；后续布局抖动打印“已分页，跳过 batch=5”，不再刷回 5。
+- 非全屏 footer 正常显示；全屏底部出现半透明 `X / Y / Z` 状态栏。
+- `flutter analyze` — 0 error；`build_slim.sh install-local` — 构建并安装成功（249M）。
+
+**未覆盖**：受 Canvas 渲染 UI 限制，无法自动点击切换全屏做实时 UI 截图；切换重载逻辑已通过日志与代码审查验证。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，

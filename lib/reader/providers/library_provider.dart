@@ -589,12 +589,20 @@ class ReaderProvider extends ChangeNotifier {
 
   void toggleFullscreen() {
     _isFullscreen = !_isFullscreen;
-    // Re-sync pages for the current chapter in the new mode
+    // 全屏↔非全屏切换时，可用高度/宽度不同，分页必须重新计算（不能只改显示
+    // 区域）。失效当前章的缓存与布局签名，让 syncViewportChars 重新全量分页：
+    // 若另一模式此前已分页（_chapterPages 双模式缓存），直接同步；否则清空
+    // 让其重新测量，确保内容真正重载而非沿用旧布局。
     final chapterIdx = currentChapterIndex;
+    _viewportSig = ''; // 失效布局签名，强制下次 syncViewportChars 重算
     if (chapterIdx >= 0) {
       final info = _chapterPages[chapterIdx];
       if (info != null) {
+        // 该章在两种模式都已有缓存：直接切到新模式的页面列表
         _syncPagesForMode(info, fullscreen: _isFullscreen);
+      } else {
+        // 该章从未在该模式分页过：清掉完整标记，等 LayoutBuilder 重新测量
+        _chapterComplete.remove(chapterIdx);
       }
     }
     notifyListeners();
