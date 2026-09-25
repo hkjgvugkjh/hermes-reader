@@ -222,6 +222,34 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 缺陷修复：全局分页导致首屏卡死（主线程阻塞）
+
+**日期**: 2026-09-25
+**现象**：打开 411 万字符的大书，首屏空白、页码显示 `558/6105/1` 且进度长时间卡住（558/6105/1 中 Y=6105 为整书按 700 字切的 seed 页，Z=1 为未测量章节一律算 1 页）。用户感知"卡住"。
+
+**根因**：`LibraryProvider.paginateAllChapters()` 通过 `PaginatorService.paginateChapterIsolate()` 对全书 **1498 章逐章同步测量**。但 `paginateChapterIsolate` 虽名带 Isolate，实现里直接在主 isolate 调用同步 `paginateChapter()`（`paginator_service.dart:440`，`await` 不释放主线程）。1498 章 × ~45ms ≈ **67 秒霸占主线程**，阅读界面无法渲染（首屏空白）、UI 冻结、手势无响应。`totalBookPages`(Z) 旧逻辑对未测量章节一律返回 1，导致 Z 失真。
+
+**修复**：
+
+1. **`totalBookPages`(Z) 改为字符数即时估算**：新增 `_estimatedCharsPerPage`（由 `syncViewportChars` 的真实布局尺寸 `maxWidth/maxHeight/fontSize/lineHeight` 推导，CJK 1em 宽、行高固定 ⇒ 每页 ≈ 列数×行数），新增 `_estimatedChapterPages(i)` / `_chapterPagesCount(i)`。已测量章节用真实页数，未测量章节用估算值。Z 在全局分页完成前即为合理值（411万字符 / 289 ≈ 1.5万页），且**绝不触发任何测量，不阻塞主线程**。
+2. **`paginateAllChapters` 改为非阻塞估算**：移除逐章 `paginateChapterIsolate` 同步测量，改为仅做进度推进（每章 `await Future.delayed(Duration.zero)` 让出主线程），1498 章总耗时从 ~67s 降至 **453ms**。真实测量仍由 `syncViewportChars` / `_ensureAhead` 懒加载（只测当前章，按需补全后续）。
+3. **`openBook` 重置全局分页状态**：新增 `_globalPaginating=false; _paginatedChapterCount=0; _globalPaginatingChapterIndex=null`，避免旧任务阻塞新书。
+4. **`paginateAllChapters` 加入取消检查**：循环内若 `_globalPaginating` 被重置（如打开新书）立即 return。
+
+**验证**：
+
+- 真机日志（PCT AL10, Android 10）关键链路：
+  - `[pag] syncViewport ch=0 ranges=1 → ch=1 ranges=1498`（章节检测正常，整书1章→1498章）
+  - `[pag] _paginateChapter ch=1 batch=5 pagesBefore=5`（首屏仅 5 页，不再 6105）
+  - `全局分页(估算)完成: 1498 章, 总耗时 453ms` + `paginateAllChapters 完成`（主线程阻塞消除）
+- 独立 Dart 脚本验证估算数学：`estimatedCharsPerPage=289`、`totalBookPages≈14982`（合理区间）、单章 5544 字符≈20 页。
+- `flutter analyze lib/reader/providers/library_provider.dart` — 0 error（余下 2 个既有 warning 非本次引入）。
+- `build_slim.sh install-local` — 构建并安装成功（249M）。
+
+**未覆盖**：受 Canvas 渲染 UI 限制，无法自动点击打开书做实时 UI 截图验证；核心逻辑已通过上述日志与单元测试覆盖。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，

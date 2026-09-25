@@ -454,23 +454,19 @@ class ReaderProvider extends ChangeNotifier {
 
   /// Returns the total number of pages in [chapterIndex] for the given mode.
   int chapterPageCount(int chapterIndex, {required bool fullscreen}) {
-    final info = _chapterPages[chapterIndex];
-    if (info == null) return 0;
-    final pages = fullscreen ? info.fullScreenPages : info.notFullScreenPages;
-    return pages.length;
+    return _chapterPagesCount(chapterIndex);
   }
 
   /// Total pages across all chapters.
   ///
-  /// Chapters that have not been paginated yet are estimated as 1 page each
-  /// (every chapter has at least one page). When [ensureChapterPages] or
-  /// [computeRemainingChapterPages] finishes, the actual page count replaces
-  /// the estimate and [notifyListeners] fires so the footer updates.
+  /// 已测量章节用真实页数；未测量章节用字符数估算（每页 ~_estimatedCharsPerPage
+  /// 字），避免在全局分页完成前 Z 值失真（旧逻辑未测量章节一律算 1 页）。
+  /// 该估算不触发任何测量，绝不阻塞主线程。
   int get totalBookPages {
+    if (_chapterRanges.isEmpty) return pageCount > 0 ? pageCount : 1;
     var total = 0;
     for (var i = 0; i < _chapterRanges.length; i++) {
-      final count = chapterPageCount(i, fullscreen: _isFullscreen);
-      total += count > 0 ? count : 1; // 未分页章节按 1 页估算
+      total += _chapterPagesCount(i);
     }
     return total;
   }
@@ -519,67 +515,32 @@ class ReaderProvider extends ChangeNotifier {
 
     final totalChapters = _chapterRanges.length;
     final stopwatch = Stopwatch()..start();
-    debugPrint('[分页] 开始全局分页: $totalChapters 章, maxWidth=$maxWidth, maxHeight=$maxHeight');
+    debugPrint('[分页] 开始全局分页(非阻塞估算): $totalChapters 章');
 
+    // 不再逐章调用 paginateChapterIsolate：其实现在主 isolate 同步执行
+    // TextPainter，1498 章 × ~45ms ≈ 67s 霸占主线程，导致首屏空白/UI 冻结。
+    // totalBookPages(Z) 现已用字符数即时估算（见 _estimatedChapterPages），
+    // 无需真正测量即可得到合理 Z。本循环仅做非阻塞的进度推进：每章 yield 一次，
+    // 让出主线程，进度条正常动画；真实测量由各章懒加载（syncViewportChars/
+    // _ensureAhead）在用户翻到时按需完成。
+    final batchYieldEvery = 1; // 每章让出一次，保证 UI 不卡
     for (var i = 0; i < totalChapters; i++) {
+      // 取消检查：如果 _globalPaginating 被重置（如打开新书），立即停止
+      if (!_globalPaginating) {
+        debugPrint('[分页] 全局分页被取消（第 $i 章）');
+        return;
+      }
       _globalPaginatingChapterIndex = i;
-      notifyListeners();
-      final range = _chapterRanges[i];
-      final text = _content?.text;
-      if (text == null) {
-        debugPrint('[分页] 第 $i 章: text 为空，跳过');
-        continue;
-      }
-
-      // Skip if already paginated (unless it's the current chapter and we need to update)
-      if (_chapterPages.containsKey(i) &&
-          !(updateCurrentChapter && i == currentChapterIndex)) {
-        _paginatedChapterCount++;
-        debugPrint('[分页] 第 $i 章: 已分页，跳过 (${_paginatedChapterCount}/$totalChapters)');
-        continue;
-      }
-
-      // 快速模式：每章只计算前 5 页，进度条能快速走完
-      final chapterStopwatch = Stopwatch()..start();
-      debugPrint('[分页] 第 $i 章: 开始分页 (offset=${range.startOffset}-${range.endOffset})');
-      ChapterPageInfo info;
-      try {
-        info = await PaginatorService.paginateChapterIsolate(
-          text,
-          chapterIndex: i,
-          chapterTitle: i < _chapters.length
-              ? _chapters[i].title
-              : '章节 ${i + 1}',
-          chapterStartOffset: range.startOffset,
-          chapterEndOffset: range.endOffset,
-          style: style,
-          maxWidth: maxWidth,
-          maxHeight: maxHeight,
-          nonFullscreenMaxHeight: nonFullscreenMaxHeight,
-          initialBatch: 5, // 快速计算前 5 页，后续按需补全
-        );
-      } catch (e) {
-        // 单章分页失败不阻塞整体流程，跳过该章
-        debugPrint('[分页] 第 $i 章: 分页失败，跳过: $e');
-        _paginatedChapterCount++;
-        notifyListeners();
-        continue;
-      }
-      chapterStopwatch.stop();
-
-      _chapterPages[i] = info;
-      _paginatedChapterCount++;
-      final pageCount = info.fullScreenPages.length;
-      debugPrint('[分页] 第 $i 章: 完成, $pageCount 页, 耗时 ${chapterStopwatch.elapsedMilliseconds}ms (${_paginatedChapterCount}/$totalChapters)');
-      // Sync pages if this is the current chapter
-      if (updateCurrentChapter && i == currentChapterIndex) {
-        _syncPagesForMode(info, fullscreen: _isFullscreen);
+      _paginatedChapterCount = i + 1;
+      // 每章让出主线程，避免阻塞（await 一个微任务即可让出 UI 帧）
+      if (i % batchYieldEvery == 0) {
+        await Future.delayed(Duration.zero);
       }
       notifyListeners();
     }
 
     stopwatch.stop();
-    debugPrint('[分页] 全局分页完成: $totalChapters 章, 总耗时 ${stopwatch.elapsedMilliseconds}ms');
+    debugPrint('[分页] 全局分页(估算)完成: $totalChapters 章, 总耗时 ${stopwatch.elapsedMilliseconds}ms');
     _globalPaginating = false;
     _globalPaginatingChapterIndex = null;
     notifyListeners();
@@ -595,8 +556,7 @@ class ReaderProvider extends ChangeNotifier {
     if (chapterIdx < 0) return pageIndex + 1;
     var offset = 0;
     for (var i = 0; i < chapterIdx; i++) {
-      final count = chapterPageCount(i, fullscreen: _isFullscreen);
-      offset += count > 0 ? count : 1;
+      offset += _chapterPagesCount(i);
     }
     return offset + pageIndex + 1;
   }
@@ -700,6 +660,10 @@ class ReaderProvider extends ChangeNotifier {
     _chapterPages.clear();
     _pages.clear();
     _viewportSig = ''; // force re-pagination with the new content
+    // 重置全局分页状态：避免旧任务阻塞新打开的书
+    _globalPaginating = false;
+    _paginatedChapterCount = 0;
+    _globalPaginatingChapterIndex = null;
     _scanChapters(content.text);
 
     // Seed the reader with a character-based pass so there is always a page to
@@ -907,6 +871,30 @@ class ReaderProvider extends ChangeNotifier {
   double _layoutMaxWidth = 0;
   double _layoutMaxHeight = 0;
 
+  /// 估算的每页字符数（由真实布局尺寸推导），用于未测量章节的总页数估算，
+  /// 使 totalBookPages(Z) 在全局分页完成前即为合理值，且不阻塞主线程。
+  double _estimatedCharsPerPage = 0;
+  double get estimatedCharsPerPage => _estimatedCharsPerPage;
+
+  /// 估算第 [i] 章的页数（未测量章节用字符数估算，避免返回 1 导致 Z 失真）。
+  int _estimatedChapterPages(int i) {
+    if (i < 0 || i >= _chapterRanges.length) return 1;
+    final len = _chapterRanges[i].endOffset - _chapterRanges[i].startOffset;
+    final cpp = _estimatedCharsPerPage;
+    if (cpp <= 0) return 1;
+    return (len / cpp).ceil().clamp(1, 1000000);
+  }
+
+  /// 第 [i] 章的页数：已测量用真实值，否则用估算值。
+  int _chapterPagesCount(int i) {
+    final info = _chapterPages[i];
+    if (info != null) {
+      final pages = _isFullscreen ? info.fullScreenPages : info.notFullScreenPages;
+      if (pages.isNotEmpty) return pages.length;
+    }
+    return _estimatedChapterPages(i);
+  }
+
   /// Saved reading offset restored on open, used to locate the starting
   /// chapter before any page has been paginated.
   int _resumeOffset = 0;
@@ -966,6 +954,19 @@ class ReaderProvider extends ChangeNotifier {
     _layoutStyle = style;
     _layoutMaxWidth = maxWidth;
     _layoutMaxHeight = maxHeight;
+
+    // 由真实布局尺寸推导每页估算字符数（CJK 1em 宽、行高固定），
+    // 供未测量章节的总页数估算使用，使 totalBookPages(Z) 即时合理。
+    if (maxWidth > 0 && maxHeight > 0 && style.fontSize != null && style.height != null) {
+      final fs = style.fontSize!;
+      final lh = (style.height! * fs);
+      if (lh > 0) {
+        final cols = (maxWidth / fs).floor();
+        final rows = (maxHeight / lh).floor();
+        final cpp = (cols * rows);
+        if (cpp > 0) _estimatedCharsPerPage = cpp.toDouble();
+      }
+    }
 
     // Lazy, per-chapter pagination: only the chapter being read is paginated,
     // and only its opening pages (see [_paginateChapter]). Paging the whole
