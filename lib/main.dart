@@ -170,7 +170,7 @@ class HermesReaderApp extends StatelessWidget {
         ),
         themeMode: ThemeMode.system,
         home: const StartupScreen(),
-        builder: (context, child) => _ClarifyDialogHandler(child: child ?? const SizedBox()),
+        builder: (context, child) => child ?? const SizedBox(),
       ),
     );
   }
@@ -182,98 +182,6 @@ class StartupScreen extends StatefulWidget {
 
   @override
   State<StartupScreen> createState() => _StartupScreenState();
-}
-
-/// Global handler that listens for clarify requests and shows dialogs
-/// on top of any screen.
-class _ClarifyDialogHandler extends StatefulWidget {
-  final Widget child;
-  const _ClarifyDialogHandler({required this.child});
-
-  @override
-  State<_ClarifyDialogHandler> createState() => _ClarifyDialogHandlerState();
-}
-
-class _ClarifyDialogHandlerState extends State<_ClarifyDialogHandler> {
-  StreamSubscription<ClarifyRequest>? _sub;
-  final Set<String> _shown = {};
-
-  @override
-  void initState() {
-    super.initState();
-    final session = context.read<SessionProvider>();
-    _sub = session.clarifyRequests.listen(_onClarify);
-  }
-
-  @override
-  void dispose() {
-    _sub?.cancel();
-    super.dispose();
-  }
-
-  void _onClarify(ClarifyRequest request) {
-    if (_shown.contains(request.clarifyId)) return;
-    _shown.add(request.clarifyId);
-    if (!mounted) return;
-    _showClarifyDialog(request);
-  }
-
-  Future<void> _showClarifyDialog(ClarifyRequest request) async {
-    final result = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => _ClarifyDialog(request: request),
-    );
-    if (result != null) {
-      // Send response back through proxy
-      final session = context.read<SessionProvider>();
-      final proxy = session.proxyClient;
-      if (proxy != null) {
-        await proxy.sendClarifyResponse(
-          sessionId: request.sessionId,
-          clarifyId: request.clarifyId,
-          response: result,
-        );
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return widget.child;
-  }
-}
-
-/// Dialog widget for a single clarify request.
-class _ClarifyDialog extends StatelessWidget {
-  final ClarifyRequest request;
-  const _ClarifyDialog({required this.request});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return AlertDialog(
-      title: Text('确认请求'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(request.question, style: theme.textTheme.bodyLarge),
-          const SizedBox(height: 8),
-          Text('来自会话 ${request.sessionId}',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              )),
-        ],
-      ),
-      actions: [
-        ...request.choices.map((choice) => TextButton(
-              onPressed: () => Navigator.of(context).pop(choice),
-              child: Text(choice),
-            )),
-      ],
-    );
-  }
 }
 
 class _StartupScreenState extends State<StartupScreen> {

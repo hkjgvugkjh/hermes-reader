@@ -323,6 +323,27 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
+## 缺陷修复：会话确认/授权事件改为仅以“待处理事项”列表呈现，不再弹模态对话框
+
+**日期**: 2026-09-25
+**需求**：Hermes Studio 会话弹出的需要确认/授权的事件（如 clarify.requested 确认请求、DI 0x39 授权请求），应以“待处理事项”列表方式呈现（点击进入显示具体信息、可选确认/拒绝），不再弹出模态选择对话框打断阅读。
+
+**根因**：`SessionProvider._onDIEvent` 处理 `clarify.requested` 时做了两件事——(1) `_clarifyController.add(ClarifyRequest(...))` → `main.dart` 的 `_ClarifyDialogHandler` 监听后弹出一个全局模态对话框（确认请求弹窗，带选项按钮）；(2) `taskProvider.addTask(...)` → 同时在“待处理事项”列表加一条。即同一事件既弹窗又入列表，弹窗打断阅读体验，且用户希望统一走列表。
+
+**修复**：
+1. `session_provider.dart`：`_onDIEvent` 移除 `_clarifyController.add(...)`，clarfiy 事件只 `taskProvider.addTask(...)`（仅列表呈现）。并清理死代码：`ClarifyRequest` 类、`_clarifyController` 字段与其 `clarifyRequests` getter、`dispose` 中的 `_clarifyController.close()`。
+2. `main.dart`：移除 `builder` 里的 `_ClarifyDialogHandler` 包裹（改回 `child ?? const SizedBox()`）；删除 `_ClarifyDialogHandler` 与 `_ClarifyDialog` 两个死代码 widget（共 186–277 行）。
+3. 待处理事项列表（TaskListScreen + TaskProvider）点击条目进入 `_TaskResolveDialog` 显示详情并可选确认/拒绝，已覆盖 clarify（`sendClarifyResponse`）与 auth（`sendAuthResponse`）两类响应，功能完整。
+
+**验证**：
+- `flutter analyze lib/main.dart lib/reader/providers/session_provider.dart` — 0 error；全局搜索 `ClarifyRequest/clarifyRequests/_ClarifyDialog` 无残留引用。
+- `build_slim.sh install-local` — 构建并安装成功（249M）。
+- 代码审查确认：clarfiy 事件现在唯一副作用为 `taskProvider.addTask`，不再触发模态弹窗；DI 0x39 授权请求此前已是仅入列表（未弹窗），行为一致。
+
+**未覆盖**：无法自动触发真实 Studio 会话事件做端到端 UI 验证；列表呈现与点击处理已由既有 TaskListScreen 覆盖，逻辑与代码审查已确认。
+
+---
+
 ## 下一步建议
 
 0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，

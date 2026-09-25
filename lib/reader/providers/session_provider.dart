@@ -11,23 +11,6 @@ import '../services/voice_command_service.dart';
 import '../providers/task_provider.dart';
 import '../models/hive_models.dart';
 
-/// A clarify request that should be shown as a global dialog.
-class ClarifyRequest {
-  final String sessionId;
-  final String clarifyId;
-  final String question;
-  final List<String> choices;
-  final DateTime? timeoutAt;
-
-  ClarifyRequest({
-    required this.sessionId,
-    required this.clarifyId,
-    required this.question,
-    required this.choices,
-    this.timeoutAt,
-  });
-}
-
 /// Owns the [SessionMonitorService] and exposes its state to the UI.
 /// Also listens to DI session updates from the proxy client.
 class SessionProvider extends ChangeNotifier {
@@ -43,13 +26,6 @@ class SessionProvider extends ChangeNotifier {
   reader_proxy.ProxyClient? _proxyClient;
   TaskProvider? _taskProvider;
   NotificationService? _notificationService;
-
-  /// Stream controller for clarify requests that should pop up globally.
-  final StreamController<ClarifyRequest> _clarifyController =
-      StreamController<ClarifyRequest>.broadcast();
-
-  /// Stream of clarify requests for the UI to listen to.
-  Stream<ClarifyRequest> get clarifyRequests => _clarifyController.stream;
 
   List<SessionChange> get recentChanges => List.unmodifiable(_recentChanges);
   bool get isInitialized => _initialized;
@@ -485,16 +461,8 @@ class SessionProvider extends ChangeNotifier {
 
     if (clarifyId.isEmpty) return;
 
-    // Push to global dialog stream
-    _clarifyController.add(ClarifyRequest(
-      sessionId: sessionId,
-      clarifyId: clarifyId,
-      question: question.isNotEmpty ? question : '需要您确认',
-      choices: choices,
-      timeoutAt: timeoutAt,
-    ));
-
-    // Also add to task list
+    // 仅以「待处理事项」列表形式呈现（点击进入显示详情、可选确认/拒绝），
+    // 不再弹出模态对话框，避免打断阅读。
     final task = TaskItem(
       id: clarifyId,
       title: question.isNotEmpty ? question : '需要您确认',
@@ -625,7 +593,6 @@ void _onChange(SessionChange change) {
     _diSub?.cancel();
     _authSub?.cancel();
     _diEventSub?.cancel();
-    _clarifyController.close();
     _monitor?.dispose();
     super.dispose();
   }
