@@ -1,6 +1,19 @@
 import 'package:flutter/foundation.dart';
 
-/// A pending task surfaced by the session monitor.
+/// Type of pending task, so the UI knows how to present and respond to it.
+enum TaskKind {
+  /// A clarification question from a backend session; user must pick an option
+  /// or type a free-form reply. Needs user interaction.
+  clarify,
+  /// An authorization / decision request surfaced by the proxy. Needs user interaction.
+  auth,
+  /// A system notification (e.g. proxy re-auth required). The proxy owns the
+  /// actual handling; the APP only shows it for awareness and never needs the
+  /// user to pick an option here.
+  system,
+}
+
+/// A pending task surfaced by session monitoring.
 class TaskItem {
   final String id;
   final String title;
@@ -10,6 +23,8 @@ class TaskItem {
   final DateTime? timeoutAt; // null = never expires
   final TaskPriority priority;
   final List<String> choices; // options offered to the user (DI 0x39)
+  final TaskKind kind; // how to present / respond to this task
+  final Map<String, dynamic>? details; // raw payload for full-context display
   bool resolved;
 
   TaskItem({
@@ -21,6 +36,8 @@ class TaskItem {
     this.timeoutAt,
     this.priority = TaskPriority.normal,
     this.choices = const [],
+    this.kind = TaskKind.auth,
+    this.details,
     this.resolved = false,
   });
 

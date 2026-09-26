@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -182,9 +184,13 @@ class _TaskTile extends StatelessWidget {
   }
 }
 
-/// Dialog that asks the user to resolve a pending authorization task. After the
-/// user confirms a choice the result is sent back to the proxy (DI 0x3A) and the
-/// dialog dismisses, returning to the previous screen.
+/// Dialog that asks the user to resolve a pending task.
+///
+/// - clarify tasks send the choice back via [ProxyClient.sendClarifyResponse]
+///   (DI 0x3B, session_id + clarify_id).
+/// - auth tasks send it back via [ProxyClient.sendAuthResponse] (DI 0x3A).
+/// When the backend provides no preset choices the user may type a free-form
+/// reply, which is sent verbatim to the proxy.
 class _TaskResolveDialog extends StatefulWidget {
   final TaskItem task;
 
@@ -196,6 +202,8 @@ class _TaskResolveDialog extends StatefulWidget {
 
 class _TaskResolveDialogState extends State<_TaskResolveDialog> {
   bool _sending = false;
+  bool _showDetail = false;
+  final TextEditingController _controller = TextEditingController();
 
   Future<void> _submit(String choice) async {
     final session = context.read<SessionProvider>();
@@ -209,22 +217,22 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
     }
     setState(() => _sending = true);
     try {
-      // Determine task type and send the appropriate response.
-      // Auth tasks use req_id + server_id; clarify tasks use session_id + clarify_id.
-      final isClarify = widget.task.description.startsWith('来自会话');
-      if (isClarify) {
-        // Extract session_id from description (format: "来自会话 $sessionId 的确认请求")
-        final desc = widget.task.description;
-        final sessionId = desc.replaceFirst('来自会话 ', '').replaceFirst(' 的确认请求', '');
+      // 按任务类型回传：clarify 用 session_id + clarify_id；auth 用 req_id + server_id。
+      final task = widget.task;
+      final details = task.details ?? <String, dynamic>{};
+      if (task.kind == TaskKind.clarify) {
+        final sessionId = task.serverId.isNotEmpty
+            ? task.serverId
+            : (details['session_id'] ?? '').toString();
         await proxyClient.sendClarifyResponse(
           sessionId: sessionId,
-          clarifyId: widget.task.id,
+          clarifyId: task.id,
           response: choice,
         );
       } else {
         await proxyClient.sendAuthResponse(
-          reqId: widget.task.id,
-          serverId: widget.task.serverId,
+          reqId: task.id,
+          serverId: task.serverId,
           result: {
             'choice': choice,
             'confirmed': choice != '拒绝' && choice != '取消',
@@ -232,8 +240,8 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
         );
       }
       if (!mounted) return;
-      // Mark resolved and return to the previous screen.
-      context.read<TaskProvider>().resolve(widget.task.id);
+      // 标记已处理并关闭对话框。
+      context.read<TaskProvider>().resolve(task.id);
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
@@ -245,12 +253,16 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
   }
 
   @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final task = widget.task;
     final expired = task.isExpired;
-    final choices = task.choices.isNotEmpty
-        ? task.choices
-        : const ['确认', '拒绝'];
+    final hasChoices = task.choices.isNotEmpty;
 
     return AlertDialog(
       title: Row(
@@ -261,20 +273,69 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
           Expanded(child: Text(task.title)),
         ],
       ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(task.description),
-          if (expired)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                '该事项已超时，操作可能不再生效',
-                style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 命令/请求细节：明确呈现给用户的核心信息。
+            Text(task.description),
+            if (expired)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '该事项已超时，操作可能不再生效',
+                  style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+                ),
               ),
-            ),
-        ],
+            const SizedBox(height: 10),
+            // 可折叠的原始命令详情，方便用户查看完整上下文。
+            if (task.details != null && task.details!.isNotEmpty)
+              TextButton.icon(
+                onPressed: () => setState(() => _showDetail = !_showDetail),
+                icon: Icon(
+                  _showDetail ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                label: const Text('命令详情', style: TextStyle(fontSize: 13)),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            if (_showDetail && task.details != null)
+              Container(
+                margin: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                constraints: const BoxConstraints(maxHeight: 200),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(task.details),
+                    style: const TextStyle(
+                        fontSize: 11, fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+            // 无预设选项时，提供自由文本输入框让用户直接回复。
+            if (!hasChoices) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _controller,
+                decoration: const InputDecoration(
+                  labelText: '直接输入回复',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                maxLines: 2,
+              ),
+            ],
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -286,18 +347,28 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
                 },
           child: const Text('稍后处理'),
         ),
-        ...choices.map(
-          (c) => FilledButton(
-            onPressed: _sending ? null : () => _submit(c),
-            child: _sending
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : Text(c),
+        if (hasChoices)
+          ...task.choices.map(
+            (c) => FilledButton(
+              onPressed: _sending ? null : () => _submit(c),
+              child: _sending
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(c),
+            ),
+          )
+        else
+          FilledButton(
+            onPressed: _sending
+                ? null
+                : () => _submit(_controller.text.trim().isEmpty
+                    ? '已阅'
+                    : _controller.text.trim()),
+            child: const Text('提交'),
           ),
-        ),
       ],
     );
   }

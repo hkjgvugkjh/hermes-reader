@@ -416,6 +416,14 @@ class SessionProvider extends ChangeNotifier {
         : '${sessionId}_${prompt.hashCode}';
     if (id.isEmpty) return;
 
+    // 认证失效类事件（"Authentication invalid" / "auth.invalid" 等）属于代理
+    // 应自行处理的范畴，不是用户可在 APP 里点选解决的项；过滤掉，避免污染
+    // 待处理列表、误导用户。代理会自行重连/重认证。
+    if (_isAuthFailure(prompt)) {
+      debugPrint('[DI] 跳过代理自管的认证失效事件: prompt="$prompt"');
+      return;
+    }
+
     final title = (req['title'] ??
             req['name'] ??
             (prompt.length > 20 ? prompt.substring(0, 20) : prompt))
@@ -440,9 +448,24 @@ class SessionProvider extends ChangeNotifier {
       timeoutAt: timeoutAt,
       priority: TaskPriority.high,
       choices: choices,
+      kind: TaskKind.auth,
+      details: req,
       resolved: false,
     );
     taskProvider.addTask(task);
+  }
+
+  /// Whether the prompt is an authentication-failure notice that the proxy
+  /// should handle on its own (re-connect / re-auth), not a user-decision item.
+  bool _isAuthFailure(String prompt) {
+    final p = prompt.toLowerCase();
+    return p.contains('authentication invalid') ||
+        p.contains('auth.invalid') ||
+        p.contains('re-authenticate') ||
+        p.contains('reauth') ||
+        p.contains('请重新认证') ||
+        p.contains('认证失效') ||
+        p.contains('unauthorized');
   }
 
   /// Handle an opaque DI event (0x3B) pushed by the proxy. Currently used to
@@ -507,11 +530,13 @@ class SessionProvider extends ChangeNotifier {
       id: clarifyId,
       title: question.isNotEmpty ? question : '需要您确认',
       description: '来自会话 $sessionId 的确认请求',
-      serverId: '',
+      serverId: sessionId,
       createdAt: DateTime.now(),
       timeoutAt: timeoutAt,
       priority: TaskPriority.high,
       choices: choices,
+      kind: TaskKind.clarify,
+      details: dataMap,
       resolved: false,
     );
     taskProvider.addTask(task);
