@@ -1,0 +1,470 @@
+# 进展记录
+
+**日期**: 2026-09-11
+**对照文档**: `PLAN.md`
+
+---
+
+## 总览
+
+| # | 规划项 | 状态 |
+|---|--------|------|
+| 1 | TTS 停止异常修复 | ✅ 完成 |
+| 2 | 扩展文件格式支持 | ✅ 完成 |
+| 3 | PDF 朗读支持 | ✅ 完成 |
+| 4 | EPUB 朗读支持 | ✅ 完成 |
+| 5 | 阅读位置记忆 | ✅ 完成（含书架 UI） |
+| 6 | 三区分页配置 | ✅ 完成（含设置入口） |
+| 7 | 朗读进度记录 | ✅ 完成 |
+| 8 | 文件类型限制（语音朗读） | ✅ 完成 |
+
+全部 8 项已实现，功能说明已并入 `README.md`。
+
+---
+
+## 本轮新增实现
+
+### 格式解析（原 2b / 3 / 4）
+
+新增 `BookTextExtractor` 抽象与 `DefaultBookTextExtractor`，按 `FileType` 分流：
+
+- `file_type_detector.dart` 已有判定逻辑，此处只需消费
+- `pdf_text_extractor.dart` — 纯 Dart 实现
+- `epub_text_extractor.dart` — 通过 `archive` 解 zip，走 `META-INF/container.xml` → OPF
+  → manifest → spine → 章节 XHTML，去标签后按章节记录分页点
+- HTML / MOBI 去标签 + 实体解码；JSON 重新缩进；纯文本原样透传
+
+`LibraryService.downloadBook()` 与 `readCached()` 改为调用提取器，并把
+`ExtractedText.breaks` 写进 `BookContent.pageBreaks`。Book 缺 `fileType` 时
+（旧数据）回退到按扩展名重新检测。
+
+`PaginatorService.paginate()` 新增 `breakOffsets`：PDF 一页 = 一个阅读页、
+EPUB 一章 = 一个阅读页，超长块再按句切分；无 breaks 时沿用原有的按字数流式分页。
+
+### 阅读位置记忆（原 5b）
+
+- `ReaderProvider` 新增 `loadProgress(bookId)`
+- 书架 `_BookTile` 显示"已读 N%"，有进度的书多出"从头开始"按钮
+- 退出阅读页回到书架时重新拉取进度
+- 空书架提示文案同步为完整的 7 种格式
+
+### 三区配置入口（原 6b）
+
+- 阅读页 AppBar 新增"阅读设置"：分区模式（三档单选）、左侧区域方向、
+  朗读自动翻页、每页字数滑块
+- 新增 `ReaderConfigStorage`，`ReaderProvider.updateConfig()` 落盘，
+  启动时由 `StartupScreen` 恢复
+
+### 朗读进度记录（原 7）
+
+- 新增 `NarrationProgress` 模型（bookId / pageIndex / charOffset / updatedAt）
+  与 `NarrationProgressService`
+- `SpeechSource` 增加可选 `setProgressHandler`，`LocalTtsSource` 转发
+  flutter_tts 的逐字进度，`TtsService` 记录最近偏移
+- 开始朗读时若有存档则跳到该页并从 `charOffset` 处续读；停止、异常、
+  离开页面都会保存；整本读完则清除
+- 与阅读进度完全独立存储，互不影响
+
+### 朗读类型限制（原 8）
+
+- 阅读页按 `book.fileType` 调 `isNarratable()`，不支持时朗读按钮置灰、
+  tooltip 说明原因，点击给出 Snackbar 提示
+
+---
+
+## 依赖变更
+
+- 新增 `archive: ^4.0.9` — EPUB 是 zip 容器，需要解压
+- 移除 `pdfrx` — 先加后删，见下
+- `pdf: ^3.10.4` 保留在 pubspec 但未使用：dart_pdf 只提供 `PdfDocumentParserBase`
+  （用于合并文档），没有文本提取 API
+
+### 为什么放弃 pdfrx
+
+`pdfrx` 基于 PDFium，构建时通过 `pdfium_dart` 的 hook 从 GitHub 下载约 10 MB 的
+原生二进制。本机访问 `github.com/bblanchon/pdfium-binaries` 超时，
+`flutter test` 与 `flutter build` 均直接失败：
+
+```
+ClientException: Connection timed out,
+uri=https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7811/pdfium-linux-x64.tgz
+Building native assets failed.
+```
+
+这与"快速构建"的目标冲突，故改为内置纯 Dart 提取器。
+
+### 为什么不用 epub 包
+
+`epub: ^3.2.0` 仍停留在 Dart 2（`sdk: '>=1.13.2 <3.0.0'`），不支持空安全，
+`flutter pub add` 直接失败。改用 `archive` 自行解析 OPF。
+
+---
+
+## 测试
+
+`flutter test` — **68 项全部通过**：
+
+| 文件 | 覆盖 |
+|------|------|
+| `file_type_detector_test.dart` | 扩展名识别、可朗读 / 可读 / 需提取判定 |
+| `book_text_extractor_test.dart` | 纯文本、HTML 去标签与实体、MOBI、JSON 与畸形 JSON、EPUB 章节顺序与分页点、损坏 EPUB 兜底、空白归一 |
+| `pdf_text_extractor_test.dart` | 未压缩流、FlateDecode 解压、TJ 数组拼接、UTF-16BE 十六进制串、转义还原、分页点、无文本与垃圾输入的兜底 |
+| `paginator_test.dart` | 按字数分页、breakOffsets 优先生效、超长块再切、越界与逆序断点过滤、空块不产生空页、进度换算、Markdown 转朗读文本 |
+| `reader_provider_test.dart` | 三区 / 两区 / 边缘的翻页与切换、方向反转、边界钳制、阅读位置恢复与越界回退、朗读进度读写与清除、两类进度互不干扰 |
+
+EPUB 测试用 `ZipEncoder` 在内存中构造 EPUB，PDF 测试直接拼内容流，都不依赖
+真实文件与平台通道；进度相关测试用 `SharedPreferences.setMockInitialValues`。
+
+---
+
+## 构建与验证
+
+- `flutter analyze` — **0 error**（余下为既有 warning/info）
+- `flutter build apk --debug` — 成功，114 秒
+- `adb install -r app-debug.apk` — Success
+- `adb shell am start com.hermes.reader/.MainActivity` — 进程存活，logcat 无 FATAL
+
+环境参数：
+
+```bash
+export PATH=/home/tomac/flutter/bin:/home/tomac/android-dev/sdk/platform-tools:$PATH
+export ANDROID_HOME=/home/tomac/android-dev/sdk
+export JAVA_HOME=/home/tomac/android-dev/jdk/jdk-17.0.11+9
+```
+
+设备：`PCT AL10`（Android 10, android-arm64），已通过 USB 连接。
+
+---
+
+## 缺陷修复：PDF 下载失败（size mismatch）
+
+**现象**：下载 `TG7221B_Datasheet_V1.0.pdf` 报
+`size mismatch: declared 1210136 but received 3070633`。
+
+**根因**：`/api/studio/files/read` 返回的是 JSON 信封 `{"content": "..."}`，
+content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放进 JSON，
+所有 >= 0x80 的字节都变成 U+FFFD。设备日志可证：
+
+```
+[TRANS] resp status=200 bodyType=String bodyLen=4094180
+[TRANS] body preview: eyJjb250ZW50IjoiJVBERi0xLjdcbiXCs++/ve+/vVxyXG4x...
+                     └─ {"content":"%PDF-1.7\n%<U+FFFD><U+FFFD>...
+```
+
+4094180 是 base64 长度，解码得 3070635 字节 JSON —— 与报错的 3070633 吻合。
+约 77% 的字节被替换为 U+FFFD（每个 3 字节），故体积膨胀到 2.54 倍。
+
+两个后果：一是触发 `validateContent` 里 `declaredSize * 2 + 1024` 的误判；
+二是**字节已不可逆丢失**，即便放宽检查，PDF 也是损坏的。
+
+**修复**：
+
+1. 新增 `FileBodyDecoder` — 下载后先剥掉 JSON 信封取 `content`，再交给后续处理。
+   严格 `utf8.decode` 失败即判定为真二进制，原样透传。
+   `.json` 类型跳过此步，避免把用户文件自身的 `content` 键误当信封。
+   `readCached` 同样处理，兼容旧版本写入的带信封缓存。
+2. `validateContent` 改为编码感知：
+   - 上限 4x + 64KB（吸收 JSON 信封与 UTF-8 膨胀），硬上限用 `maxTransferBytes`
+   - 下限仅在不足声明值 1/4 时报 `truncated`，这才是真正值得失败的截断
+   - 声明大小超过 `maxFileBytes` 单独拒绝
+   原先 `declaredSize * 2 + 1024` 对任何有编码开销的传输都会误伤。
+3. **二进制回退**：检测到 U+FFFD 污染且文件类型需提取（PDF/EPUB/MOBI）时，
+   带 `encoding=base64` 重试一次。服务端若支持就拿到完整字节（已缓存为干净副本），
+   不支持则沿用首次结果，不额外报错。
+
+**未解决**：服务端不配合时，二进制仍会损坏 —— 这是接口设计问题，客户端无法还原。
+彻底修复需要服务端增加二进制安全端点（返回原始字节或 base64），见"下一步建议"。
+
+---
+
+## 缺陷修复：书架列表超时
+
+**现象**：打开书架（服务器模式）卡住并提示超时，无法加载服务器 / 会话列表。
+
+**根因**：WebSocket 握手永远无法完成，请求被挡在 `connect()` 之前，30s 后超时。
+两层原因：
+
+1. **URL 构建错误**（主因）：`proxy_client.dart` 的握手 URL 由 `proxyUrl` 经
+   `Uri.parse` 派生，旧逻辑对"默认端口"判断有误——`Uri.hasPort` 对
+   `https://host`（未显式写端口）为 false，而 `uri.port` 回退为 `0`，被字符串拼成
+   `https://host:0/ws`。`:0` 端口无法拨号，且 scheme 没从 `https` 归一成 `wss`，
+   token 还被重复拼接。设备日志可证：
+   `Connection to 'https://hermes-proxy.willam.eu.org:0/ws?token=...#'` 的握手始终
+   `was not upgraded to websocket`。
+2. **`connect()` 非幂等**（次因）：并发调用 `connect()` 各自开一条 socket 并互相覆盖
+   `_channel`，导致晚到者永远 `await` 一条已废弃的连接，进而触发超时。
+
+**修复**:
+
+1. 新增 `_buildUri()`：统一归一化 scheme（https/wss→wss，其余→ws）、隐藏默认端口
+   （不再拼 `:0`）、只保留一次 `token`，彻底消除坏 URL。
+2. `connect()` 改为并发安全：用单一 `_connecting` Completer 共享同一次握手，晚到者
+   `join` 而非新开 socket；失败时清空状态以便重试；`disconnect()` 重置。
+3. `proxy_file_transport.get()` 在连接失败时断开并重试一次，避免单次握手抖动误报超时。
+
+**验证**：重新构建安装后 logcat 显示
+`[AUTO] Connected, got 3 servers` → `[ONCONNECTED] Proxy client connected!`
+→ `[FETCH] Got 77 sessions for server 185`，书架列表正常加载，超时消失。
+
+---
+
+## 已知限制
+
+1. **二进制文件经服务端传输会损坏**：`files/read` 走 JSON 字符串，非 ASCII 字节变
+   U+FFFD。文本格式不受影响；PDF/EPUB 除非服务端支持 `encoding=base64`，否则拿到的是
+   损坏内容。客户端已做污染检测与回退，但无法凭空还原字节。
+2. **PDF 文本质量**：纯 Dart 提取器覆盖普通字符串与 UTF-16BE 十六进制串；
+   依赖外部 ToUnicode CMap 的中文 PDF 会乱码，扫描件无文本可提（会显示说明文字而非报错）。
+   若日后网络可用，可换回 `pdfrx` 以获得完整字形映射。
+2. **GBK 编码**：中文老书常见的 GBK 仍无法解码，按 latin-1 兜底显示。
+3. **PDF / EPUB 仅文本**：不做版式渲染，阅读体验等同纯文本。
+4. `flutter_tts` 仍在使用 Kotlin Gradle Plugin，未来 Flutter 版本会构建失败，需关注插件升级。
+
+---
+
+## 缺陷修复：全局分页导致首屏卡死（主线程阻塞）
+
+**日期**: 2026-09-25
+**现象**：打开 411 万字符的大书，首屏空白、页码显示 `558/6105/1` 且进度长时间卡住（558/6105/1 中 Y=6105 为整书按 700 字切的 seed 页，Z=1 为未测量章节一律算 1 页）。用户感知"卡住"。
+
+**根因**：`LibraryProvider.paginateAllChapters()` 通过 `PaginatorService.paginateChapterIsolate()` 对全书 **1498 章逐章同步测量**。但 `paginateChapterIsolate` 虽名带 Isolate，实现里直接在主 isolate 调用同步 `paginateChapter()`（`paginator_service.dart:440`，`await` 不释放主线程）。1498 章 × ~45ms ≈ **67 秒霸占主线程**，阅读界面无法渲染（首屏空白）、UI 冻结、手势无响应。`totalBookPages`(Z) 旧逻辑对未测量章节一律返回 1，导致 Z 失真。
+
+**修复**：
+
+1. **`totalBookPages`(Z) 改为字符数即时估算**：新增 `_estimatedCharsPerPage`（由 `syncViewportChars` 的真实布局尺寸 `maxWidth/maxHeight/fontSize/lineHeight` 推导，CJK 1em 宽、行高固定 ⇒ 每页 ≈ 列数×行数），新增 `_estimatedChapterPages(i)` / `_chapterPagesCount(i)`。已测量章节用真实页数，未测量章节用估算值。Z 在全局分页完成前即为合理值（411万字符 / 289 ≈ 1.5万页），且**绝不触发任何测量，不阻塞主线程**。
+2. **`paginateAllChapters` 改为非阻塞估算**：移除逐章 `paginateChapterIsolate` 同步测量，改为仅做进度推进（每章 `await Future.delayed(Duration.zero)` 让出主线程），1498 章总耗时从 ~67s 降至 **453ms**。真实测量仍由 `syncViewportChars` / `_ensureAhead` 懒加载（只测当前章，按需补全后续）。
+3. **`openBook` 重置全局分页状态**：新增 `_globalPaginating=false; _paginatedChapterCount=0; _globalPaginatingChapterIndex=null`，避免旧任务阻塞新书。
+4. **`paginateAllChapters` 加入取消检查**：循环内若 `_globalPaginating` 被重置（如打开新书）立即 return。
+
+**验证**：
+
+- 真机日志（PCT AL10, Android 10）关键链路：
+  - `[pag] syncViewport ch=0 ranges=1 → ch=1 ranges=1498`（章节检测正常，整书1章→1498章）
+  - `[pag] _paginateChapter ch=1 batch=5 pagesBefore=5`（首屏仅 5 页，不再 6105）
+  - `全局分页(估算)完成: 1498 章, 总耗时 453ms` + `paginateAllChapters 完成`（主线程阻塞消除）
+- 独立 Dart 脚本验证估算数学：`estimatedCharsPerPage=289`、`totalBookPages≈14982`（合理区间）、单章 5544 字符≈20 页。
+- `flutter analyze lib/reader/providers/library_provider.dart` — 0 error（余下 2 个既有 warning 非本次引入）。
+- `build_slim.sh install-local` — 构建并安装成功（249M）。
+
+**未覆盖**：受 Canvas 渲染 UI 限制，无法自动点击打开书做实时 UI 截图验证；核心逻辑已通过上述日志与单元测试覆盖。
+
+---
+
+## 缺陷修复：章节总页数 Y 恒为 5、全书总页数 Z 暴涨到 159879
+
+**日期**: 2026-09-25
+**现象**：修复首屏卡死后，阅读页页码变成 `X / 5 / 159879`——当前章节总页数（Y）永远停在 5，全书总页数（Z）暴涨到 159879（正常应为 ~14970），且 Z 数字明显不对。用户要求“执行初步分页前要检查是否已分页成功”。
+
+**根因（两个独立 bug）**：
+
+1. **Y 恒为 5 的根因——`_paginateChapter` 从不缓存分页结果**：
+   旧 `_paginateChapter`（含 batch=5 与 batch=-1）只把结果写进临时 `_pages`，**从不写入 `_chapterPages[ch]`**。而 `syncViewportChars` 的“已分页”守卫依赖 `_chapterPages.containsKey(ch)`，永远为 false，于是每次 `LayoutBuilder` 因 footer 动画 / 安全区变化导致 `maxHeight` 在 436↔461 抖动（每次都改变 `_viewportSig`）都会**重跑 batch=5，把 Y 重新刷回 5 页**。异步补全原本走 `computeRemainingChapterPages`，但它也依赖 `_chapterPages.containsKey` 作 guard（永远 false → 提前 return），且内部调的是另一套 `paginateChapterIsolate` 还抛异常，于是当前章永远停在 batch=5 的 5 页，Y 修不正。
+
+2. **Z 暴涨到 159879 的根因——估算值被瞬时异常布局污染**：
+   `syncViewportChars` 每次布局都**无条件**用 `cols*rows` 覆盖 `_estimatedCharsPerPage`（每页字符数）。`LayoutBuilder` 在首帧 / 动画过渡时会回调若干次**瞬时异常小尺寸**（footer 未展开、安全区未计入），某次把 `cpp` 污染成极小值（≈25），于是 `Z = 4111030 / 25 ≈ 159879` 暴涨。
+
+**修复**：
+
+1. **`_paginateChapter` 写入 `_chapterPages`**：分页完成后把 `entries` 映射成 `ChapterPageInfo` 缓存（`fullscreen` / `notFullScreen` 两套分页分别缓存，当前模式写真实列表、另一模式继承上次）。`initialBatch<0 || !truncated` 时照旧加 `_chapterComplete`。这样“已分页”守卫生效，后续布局抖动**跳过 batch=5**，Y 不再被刷回 5。
+2. **`syncViewportChars` 守卫改为“已分页即跳过 batch=5”**：以 `_chapterPages.containsKey(ch)` 判据——已分页过的章直接 `_syncPagesForMode` 同步现有页，未完整则**异步**补全（改用已验证可用的 `_paginateChapter(ch, initialBatch:-1)`，不再用会抛异常的 `computeRemainingChapterPages`）。只有“从未分页过的章”才首次跑 batch=5。
+3. **`_estimatedCharsPerPage` 取有效最大值**：只在 `cols>=3 && rows>=3`（排除瞬时异常小尺寸）时才接受该次估算，且取所有有效调用的**最大值**（瞬时收缩只会让 cpp 变小，取 max 保证 Z 永不因瞬时布局而暴涨）。
+4. （附带）`computeRemainingChapterPages` 补全成功后补 `_chapterComplete.add(ch)`，避免重复补全。
+
+**验证（真机 PCT AL10, Android 10 日志）**：
+
+- Y 修复：`ch=1` 首次 `batch=5` 后异步 `batch=-1` 补全返回 `entries=23 truncated=false`（当前章真实页数=23，不再是 5）；后续布局抖动（h=436/461/610）全部打印 `[pag] syncViewport ch=1 已分页，直接同步现有页（跳过 batch=5）`，Y 稳定为 23，不再刷回 5。
+- Z 修复：临时打印 `totalBookPages` 验证，Z 从布局过渡期的 1→14226→6 抖动后**稳定在 14970**，`estimatedCpp=289.0`（即每页 289 字符，305.6×436/(17×26.4) 合理），不再暴涨到 159879。临时调试打印已移除。
+- `flutter analyze` — 0 error；`build_slim.sh install-local` — 构建并安装成功（249M）。
+
+**未覆盖**：受 Canvas 渲染 UI 限制，无法自动点击打开书做实时 UI 截图；Z/Y 数值已通过日志与临时打印验证。
+
+---
+
+## 缺陷修复：全屏模式缺状态栏 + 切换时仅改区域不重载内容
+
+**日期**: 2026-09-25
+**需求**：为全屏模式增加同样的状态栏（显示页码码 X/Y/Z、进度等）；全屏↔非全屏切换时显示内容需重新加载，不能只是显示区域变化。后续补充：全屏模式不显示章节标题（“第N章”字样）。
+
+**根因**：
+- UI 全屏切换用 `setState(() => _isFullscreen = ...)`（screen 自己的字段），**从未调用 `ReaderProvider.toggleFullscreen()`**，导致 provider 内部的 `_isFullscreen` 永远是 `false`，`_chapterPages` 从没存过 fullscreen 模式页。
+- 全屏模式下 `appBar: null` 且 `_ReaderFooter` 被 `!_isFullscreen` 条件隐藏 → 全屏无任何状态栏，页码/进度/码全部看不到。
+- provider 旧 `toggleFullscreen` 只 `_syncPagesForMode` 复用已缓存页，未失效 `_viewportSig`，切换后 LayoutBuilder 因签名未变可能不重算 → 用户感知为“只是显示区域变化，内容未真正重载”。
+- `_ReaderFooter` 章节标题行 `if (chapterTitle != null)` 全屏也显示“第N章”。
+
+**修复**：
+
+1. **全屏状态栏（底部常驻半透明条）**：`_ReaderFooter` 渲染条件由 `if (_controlsVisible && !_isFullscreen)` 改为 `if (_controlsVisible || _isFullscreen)`；全屏时外包 `Container(color: Colors.black54)` 半透明背景常驻显示。复用同一 `_ReaderFooter`，显示 `X / Y / Z` + 进度条 + 翻页/朗读按钮。footer 内 `Spacer()` 条件由 `!isFullscreen && !isGlobalPaginating` 放宽为 `!isGlobalPaginating`，保证全屏时翻页/朗读按钮靠右布局不挤左。
+2. **切换改用 provider 真正重载**：全屏切换点（中心点击 thirds 模式 toggle 区）由 `setState(() => _isFullscreen = ...)` 改为 `reader.toggleFullscreen()` + `setState(() => _isFullscreen = reader.isFullscreen)`（UI 字段与 provider 真源同步）。
+3. **provider `toggleFullscreen` 失效缓存并重分页**：切换 `_isFullscreen` 后 `_viewportSig = ''`（强制下次 `syncViewportChars` 重算）；若另一模式已缓存则 `_syncPagesForMode` 直接切，否则 `_chapterComplete.remove(ch)` 等 LayoutBuilder 重新测量。满足“切换时重新加载内容而非仅改区域”。
+4. **全屏不显示章节标题**：`_ReaderFooter` 标题行条件加 `&& !isFullscreen`。
+
+**验证（真机 PCT AL10, Android 10 日志）**：
+- 全屏切换后 `syncViewport` 重新触发分页（fullscreen 参数随布局变化传入），当前章走 `batch=5` → 异步 `batch=-1` 补全，Y 重新计算；后续布局抖动打印“已分页，跳过 batch=5”，不再刷回 5。
+- 非全屏 footer 正常显示；全屏底部出现半透明 `X / Y / Z` 状态栏。
+- `flutter analyze` — 0 error；`build_slim.sh install-local` — 构建并安装成功（249M）。
+
+**未覆盖**：受 Canvas 渲染 UI 限制，无法自动点击切换全屏做实时 UI 截图；切换重载逻辑已通过日志与代码审查验证。
+
+---
+
+## 缺陷修复：分页状态栏改为“当前页/全书总页数”，消除错误的“5页”
+
+**日期**: 2026-09-25
+**现象**：状态栏显示 `2/5/14967`——中间“5”是第一章节首次分页未完成时的临时 batch=5 章页数（chapterPageCount），第一章尚未补全时显示成错误的“5页”；用户要求改为“当前页/全书总页数”。
+
+**根因**：`_ReaderFooter` 页码显示串为 `${pageIndex+1} / $pageCount / $totalBookPages`（当前章内页 / 本章页 / 全书页）。其中 `$pageCount`（=_pages.length）在章节分页未完成时仅 batch=5 的临时值，第一章因此显示成“5”，且语义上“本章页数 Y”在懒分页下本就无稳定含义。
+
+**修复**：footer 页码显示改为只显示 **`$globalPageIndex / $totalBookPages`**（当前页用全书累计 1-based 页码 / 全书总页数 Z）。`globalPageIndex` 已是含章节偏移的 1-based 全书累计页码（`_chapterPagesCount` 对未分页章用字符估算，与 Z 口径一致）。不再显示单独的本章页数，因此“5”这类临时值彻底消失。
+
+**验证**：
+- 独立 Dart 脚本复刻 `globalPageIndex` 公式与 footer 显示串：第2章第1页→`21/43`、第1章末页→`20/43`、第2章末页→`43/43`，断言全部通过，格式确为“当前页(全书累计)/全书总页数”。
+- `flutter analyze` — 0 error；`build_slim.sh install-local` — 构建并安装成功（249M）。
+- 真机因 Canvas UI 无法自动进书截图，但通过代码审查确认 footer 文本构造已变更、不再引用 `pageCount` 作中间项。
+
+---
+
+## 缺陷修复：会话确认/授权事件改为仅以“待处理事项”列表呈现，不再弹模态对话框
+
+**日期**: 2026-09-25
+**需求**：Hermes Studio 会话弹出的需要确认/授权的事件（如 clarify.requested 确认请求、DI 0x39 授权请求），应以“待处理事项”列表方式呈现（点击进入显示具体信息、可选确认/拒绝），不再弹出模态选择对话框打断阅读。
+
+**根因**：`SessionProvider._onDIEvent` 处理 `clarify.requested` 时做了两件事——(1) `_clarifyController.add(ClarifyRequest(...))` → `main.dart` 的 `_ClarifyDialogHandler` 监听后弹出一个全局模态对话框（确认请求弹窗，带选项按钮）；(2) `taskProvider.addTask(...)` → 同时在“待处理事项”列表加一条。即同一事件既弹窗又入列表，弹窗打断阅读体验，且用户希望统一走列表。
+
+**修复**：
+1. `session_provider.dart`：`_onDIEvent` 移除 `_clarifyController.add(...)`，clarfiy 事件只 `taskProvider.addTask(...)`（仅列表呈现）。并清理死代码：`ClarifyRequest` 类、`_clarifyController` 字段与其 `clarifyRequests` getter、`dispose` 中的 `_clarifyController.close()`。
+2. `main.dart`：移除 `builder` 里的 `_ClarifyDialogHandler` 包裹（改回 `child ?? const SizedBox()`）；删除 `_ClarifyDialogHandler` 与 `_ClarifyDialog` 两个死代码 widget（共 186–277 行）。
+3. 待处理事项列表（TaskListScreen + TaskProvider）点击条目进入 `_TaskResolveDialog` 显示详情并可选确认/拒绝，已覆盖 clarify（`sendClarifyResponse`）与 auth（`sendAuthResponse`）两类响应，功能完整。
+
+**验证**：
+- `flutter analyze lib/main.dart lib/reader/providers/session_provider.dart` — 0 error；全局搜索 `ClarifyRequest/clarifyRequests/_ClarifyDialog` 无残留引用。
+- `build_slim.sh install-local` — 构建并安装成功（249M）。
+- 代码审查确认：clarfiy 事件现在唯一副作用为 `taskProvider.addTask`，不再触发模态弹窗；DI 0x39 授权请求此前已是仅入列表（未弹窗），行为一致。
+
+**未覆盖**：无法自动触发真实 Studio 会话事件做端到端 UI 验证；列表呈现与点击处理已由既有 TaskListScreen 覆盖，逻辑与代码审查已确认。
+
+---
+
+## 缺陷修复（根因）：系统侧有弹出但 APP「待处理事项」从未出现 — DI 事件 payload 形状不匹配导致静默丢弃
+
+**日期**: 2026-09-25
+**现象**：Studio 会话弹出的确认/授权事件，系统（proxy）侧有广播，但 APP「待处理事项」列表里一条都没有（之前能"弹出"靠的是已被移除的模态对话框，列表路径其实一直失效）。
+
+**根因（沿链路排查）**：
+1. **0x3B `clarify.requested`**：proxy (`studio_adapter.go:333`) 把后端原始事件 data 作为**嵌套 JSON 字符串**塞进 `DIEventPayload.Data`（`data` 字段是 string，非 Map）。reader `_onDIEvent` 旧代码 `final data = event['data']; if (data is! Map) return;` 因 `data` 是 String → 直接 `return`，任务**从未加入列表**。
+2. **0x39 授权请求**：proxy 的 `DIAuthReqPayload`（`di.go:175`）形状为 `{session_id, prompt, choices}`，**不含 `req_id`**。reader `_onDIAuthRequest` 旧代码 `final reqId = req['req_id'] ?? req['id']; if (reqId.isEmpty) return;` 因 proxy 不发 req_id → `reqId` 为空 → 直接 `return`，auth 授权请求**也从未加入列表**（`id` 字段被设为空导致丢弃）。
+
+**修复**（`lib/reader/providers/session_provider.dart`）：
+1. `_onDIEvent`：兼容 `data` 为嵌套 JSON 字符串（二次 `jsonDecode`）与 Map 两种形状；字段回退更稳（`clarify_id/id`、`question/text/prompt`、`timeout_ms/timeout`）；加 `debugPrint('[DI] clarify.requested 解析: ...')` 便于真机日志确认。
+2. `_onDIAuthRequest`：id 回退到 `${sessionId}_${prompt.hashCode}`（proxy 不发 req_id 时仍非空且基本唯一）；`serverId` 取 `session_id`（旧代码取 `req['server_id']` 恒为空）；携带 `choices` 字段；加 `debugPrint('[DI] auth.request 解析: ...')`。
+
+**验证**：
+- `flutter analyze lib/reader/providers/session_provider.dart` — 0 error / 0 warning。
+- `build_slim.sh install-local` — 构建并安装成功（249M）。
+- 独立仿真 `scripts/verify_di_event_parse.dart`（dart 运行）：构造 proxy 真实的三种 payload（0x3B 嵌套字符串、0x39 无 req_id、0x3B 平铺 Map）喂入修复后的解析分支，断言 3 条任务全部进入列表 → **全部断言通过 ✅**。
+- 真机端到端：后台 `adb logcat` 监听 `[DI]` 日志（见 `/tmp/di_verify.log`），等下次真实会话事件触发时确认 `[DI] clarify.requested 解析` / `[DI] auth.request 解析` 打印、列表出现对应条目。
+
+---
+
+## 根因深挖 + 完整修复：系统侧有弹出但 APP「待处理事项」从不显示（四层根因）
+
+**日期**: 2026-09-25
+**现象**：Studio 会话弹出的确认/授权事件，系统（Studio Web UI / proxy）侧有广播，但 APP「待处理事项」列表从未出现任何条目。
+
+**沿链路逐层排查，发现四层独立根因（每一层都足以让事件丢失）：**
+
+### 根因 A（最关键，proxy 端）：`studio_adapter.handleSocketIO` 从不分发 Studio 事件
+- `handleFrame` 收到 Socket.IO 帧后调用 `handleSocketIO(frame[1:])`（已去掉首字符 `4`）。
+- 但 `handleSocketIO` 内部判断 `if pkt[0] == '4' && pkt[1] == '2'` —— 传入的 `pkt` 首字符已是 `2`（`42` 的第二个字符），条件**永远不成立**，所有 Studio 事件（clarify / auth / notification）被静默丢弃。
+- 证据：`/tmp/proxy.log` 中 `[studio] frame:` 有 8817 次，但 `dispatchEvent` 的 `[studio] event:` 日志出现 **0 次**（加 `[di-debug]` 验证：修复前 `broadcastDI mt=0x3b` 从未出现）。
+- **修复**（`hermes-proxy/internal/proxy/studio_adapter.go`）：`handleSocketIO(frame)` 传整帧，使 `pkt[0]=='4' && pkt[1]=='2'` 正确匹配。
+
+### 根因 B（reader 端协议解码）：hermes-shared 的 v2 二进制解码缺失
+- proxy v2 对 0x39/0x3B 用紧凑二进制（`EncodeAuthReqV2`/`EncodeEventV2`）编码；reader 端 `_decodePayload` 对 0x39/0x3B 在 v2 下错误地 `jsonDecode` 帧明文 → 解码失败被 `_onMessage` 的 catch 吞掉 → 事件流收不到。
+- **修复**（`hermes-shared`）：新增 `decodeDiAuthReq` / `decodeDiEvent`（与 proxy 字段 tag 一致：`fAuthReqSessionID/Prompt/Choices=1/2/3`，`fEventDirection/Name/Data=1/2/3`），并在 `_decodePayload` v2 分支对 0x39/0x3B 调用它们（JSON 兜底）。同步修复上行 `sendClarifyResponse` 在 v2 下用 `encodeDiEvent`（否则 clarify 响应上报失败）。
+
+### 根因 C（reader 端数据形状）：`_onDIEvent` 把嵌套 JSON 字符串当 Map 丢弃
+- proxy 把后端原始 `data` 作为**嵌套 JSON 字符串**塞进 `DIEventPayload.Data`；旧 `_onDIEvent` 在 `if (data is! Map) return;` 处直接丢弃。0x39 也缺 `req_id`（`if (reqId.isEmpty) return;` 丢弃全部 auth）。
+- **修复**（`session_provider.dart`）：`_onDIEvent` 兼容 `data` 为嵌套字符串（二次 `jsonDecode`）；`_onDIAuthRequest` 的 id 回退到 `${sessionId}_${prompt.hashCode}`，携带 `choices`。
+
+### 根因 D（reader 端依赖注入）：`_taskProvider` 从未被设置
+- `ProxyProvider<TaskProvider, void>` 的 `update` 时序不可靠，`_taskProvider` 实测为 **NULL** → `_onDIEvent`/`_onDIAuthRequest` 开头 `if (taskProvider == null) return;` 直接返回，`addTask` 永不执行。
+- 证据：真机日志 `[DI] _onDIEvent taskProvider=NULL`。
+- **修复**（`main.dart`）：在 `_onConnected` 设置 proxy client 后，显式 `sessionProvider.setTaskProvider(context.read<TaskProvider>())`（此时所有 provider 已就绪）。
+
+**验证（真机端到端，全部 ✅）**：
+- 修复 A 后：`[di-debug] broadcastDI mt=0x3b subscribers=1 bcID=185` 首次出现（此前 0 次）。
+- 修复 B/C/D 后真机日志：
+  ```
+  [DI] clarify.requested 解析: session=mu9uerb47m9bay clarifyId=62edfbf1...
+    question="下一步选 A 还是 B？" choices=[A (Recommended), B]
+  [DI] auth.request 解析: session= id=_803944495 prompt="Authentication invalid..." choices=[]
+  ```
+  即 clarify 与 auth 事件均成功 `addTask` 进入「待处理事项」列表。
+- `flutter analyze lib/main.dart lib/reader/providers/session_provider.dart` — 0 error / 0 warning。
+- `build_slim.sh install-local` — 构建并安装成功（含 hermes-shared 本地依赖重新编译）。
+
+**涉及仓库/提交**：
+- `hermes-application/hermes-proxy`：`studio_adapter.go` handleSocketIO 修复（+ di-debug 排查日志）。
+- `hermes-application/hermes-shared`：`binary_codec.dart`/`binary_messages.dart`/`proxy_client.dart` v2 解码（0x39/0x3B）+ 上行 encodeDiEvent。
+- `hermes-application/hermes-reader`：`session_provider.dart` 数据形状修复 + `main.dart` taskProvider 注入 + 旧模态对话框清理（前序提交）。
+
+---
+
+## 下一步建议
+
+0. **（阻塞项，需后端配合）** 让 `/api/studio/files/read` 支持二进制安全返回，
+   例如 `?encoding=base64` 输出 base64 字符串，或新增返回原始字节的 `files/raw`。
+   客户端已具备该能力的消费路径（见上文"二进制回退"），后端支持后 PDF/EPUB 即可完整读取。
+1. 真机试读一本 PDF 与一本 EPUB，确认提取质量是否满足需求
+2. 若 PDF 乱码严重，评估引入 PDFium（需要能访问 GitHub Release）或改用
+   服务端提取：让服务器返回已解析的文本
+3. 补充 GBK / GB18030 编码探测（`charset_converter` 或内置码表）
+4. 清理 `ebook_reader_screen.dart`（未接入导航的遗留屏幕，含未使用代码）
+
+---
+
+## 2026-09-27 章节目录快速定位（搜索框 + 拖动条）
+
+**需求**：章节太多时目录列表难定位，需加拖动条与快速检索。
+
+**改动**（`lib/reader/screens/book_reader_screen.dart` `_showChapterList`）：
+- 顶部新增**搜索框**（按章节标题实时 `contains` 过滤，不区分大小写），右侧"清除"按钮。
+- 新增**拖动条 Slider** 粗定位：拖动实时滚动列表，右侧显示 `当前/总 章节数`（如 `5/51`）。
+- `isScrollControlled: true` 让长目录占用更多竖屏空间。
+- 适配过滤后的索引：当前章节居中定位、点击跳转、Slider label 均基于 `filtered` 列表。
+
+**真机验证**（华为 P10 / PCT AL10，已装 `e248ef3` 构建）：
+- 华为设备**无 `screenrecord`**（EXIT=127），本机无 scrcpy/ffmpeg → 改用 `adb exec-out screencap` 截图序列替代录屏（屏幕捕捉唯一可用通道）。
+- 造 51 章中文 TXT《迷踪纪元》推至 `/storage/emulated/0/hermes-reader/library/`，本地文库识别。
+- 真机控件证据（uiautomator content-desc）：
+  - 打开书：`《迷踪纪元》 作者：佚名 | 全文共 51 章` + 分页 `1 / 103`。
+  - 章节目录 sheet：`选择章节` + SeekBar `0%, 1. 序章` + 计数 `1/51` + 章节列表（序章…第十章）。
+  - **拖动条定位**：拖动后 `1/51` → `5/51`，列表随定位。
+  - **搜索框过滤**：输入 `1` → 列表实时变 `无匹配章节`（标题为中文数字，不含阿拉伯数字，过滤正确）；EditText + 清除按钮均存在。
+  - **中文搜索已真机确证**：安装 ADBKeyboard 并设为默认输入法后，广播注入"星" → EditText=`星`，列表实时过滤为仅 `第四章 星陨之谷` + `第四十七章 星图猎人`（2 项），Slider label 同步 `100%, 48. 第四十七章 星图猎人`。中文过滤分支在真机完整通过。
+- 截图存于 `doc/demo/`：01_wenku / 02_reading / 03_chapter_list / 04_slider_end / 05_search_1 / 06_search_star / 07_chapter_fresh / 08_search_star_cn（中文"星"过滤结果）。
+
+**提交**：`e248ef3` feat 章节目录增加搜索框与拖动条（已推 origin/master）。
+
+**说明**：原"录屏方式执行"因华为无 screenrecord 改为截图序列验证，功能确证完整。
+
+---
+
+## 2026-09-27 待处理事项弹层显示会话内容
+
+**需求**：点击待处理事项弹层，除命令详情外，能否看到所属会话的聊天内容。
+
+**结论（现状）**：此前弹层**不显示会话内容**——仅 `description` + 可折叠"命令详情"（原始 JSON payload），未拉取会话历史。
+
+**改动**（`lib/reader/screens/task_list_screen.dart` `_TaskResolveDialog`）：
+- 弹层打开时按 `task.serverId`（即该待办所属会话 id）异步拉取会话历史消息（`SessionProvider.clientForSession(serverId).getSessionMessages(serverId)`，底层 GET `/api/hermes/sessions/<id>/context` 返回 `List<ChatMessage>`）。
+- `clientForSession` 为 null 时 fallback 到 monitor 首个 target 构造 client（单后端场景可拉到）。
+- 新增"会话内容"折叠区：加载中显示进度；错误显示红字；空显示"该会话暂无消息"；有消息则显示 `ROLE: 内容` 列表（user=蓝/assistant=绿，等宽字体、可滚动、maxHeight 260）。
+- `task.serverId` 为空（如纯 auth 类）不显示该入口。
+
+**验证状态**：
+- `flutter analyze` 干净（无新增 error/warning）；真机 PCT AL10 已构建安装 249M APK 成功（`cf52581`）。
+- `ChatMessage` 字段（`role`/`content`/`timestamp`）与 `getSessionMessages` 构造一致，解析链路正确。
+- ⚠️ **端到端真机验证未做**：后端185当前 `"No sessions"`（无活跃会话，无法产生待办），且访问后端被安全策略阻断，无法制造/抓取真实待办触发弹层。代码逻辑已静态确证 + 构建安装通过，待后端恢复有会话后可在真机点开 clarify 待办验证"会话内容"展开。
+
+**提交**：`cf52581` feat 待处理事项弹层增加"会话内容"折叠区（已推 origin/master）。
