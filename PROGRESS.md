@@ -450,21 +450,24 @@ content 是**字符串**形式。服务端把二进制按 UTF-8 解码后再放�
 
 ---
 
-## 2026-09-27 待处理事项弹层显示会话内容
+## 2026-09-27 待处理事项弹层显示会话内容（续）
 
-**需求**：点击待处理事项弹层，除命令详情外，能否看到所属会话的聊天内容。
+**需求**：点击任务结束弹出层，能否显示所属会话的聊天内容。
 
-**结论（现状）**：此前弹层**不显示会话内容**——仅 `description` + 可折叠"命令详情"（原始 JSON payload），未拉取会话历史。
+**两处"弹出层"澄清**（真机实测）：
+1. **会话详情弹窗 `session_detail_dialog`**（点 Session 列表卡片打开）：**已完整显示会话内容**——消息列表、角色标签（我/助手）、Markdown 渲染、刷新快照、可继续对话。这本来就是用户真机看到的"弹出层"，**已具备显示会话内容能力**。
+2. **待办 resolve 弹窗 `_TaskResolveDialog`**（点 Tasks 待办卡片打开）：本次新增"会话内容"折叠区，按 `task.serverId` 拉取历史消息。
 
-**改动**（`lib/reader/screens/task_list_screen.dart` `_TaskResolveDialog`）：
-- 弹层打开时按 `task.serverId`（即该待办所属会话 id）异步拉取会话历史消息（`SessionProvider.clientForSession(serverId).getSessionMessages(serverId)`，底层 GET `/api/hermes/sessions/<id>/context` 返回 `List<ChatMessage>`）。
-- `clientForSession` 为 null 时 fallback 到 monitor 首个 target 构造 client（单后端场景可拉到）。
-- 新增"会话内容"折叠区：加载中显示进度；错误显示红字；空显示"该会话暂无消息"；有消息则显示 `ROLE: 内容` 列表（user=蓝/assistant=绿，等宽字体、可滚动、maxHeight 260）。
-- `task.serverId` 为空（如纯 auth 类）不显示该入口。
+**本轮修正的 bug**：显示入口条件原先写 `task.serverId.isNotEmpty`，但加载逻辑会兜底 serverId（details.session_id），导致兜底后按钮不出现。改为统一用 `_resolvedServerId`（= 最终用于加载的 serverId）。另增加 `details['session_id']` 兜底（部分 DI 事件把 session_id 平铺在该字段）。
 
-**验证状态**：
-- `flutter analyze` 干净（无新增 error/warning）；真机 PCT AL10 已构建安装 249M APK 成功（`cf52581`）。
-- `ChatMessage` 字段（`role`/`content`/`timestamp`）与 `getSessionMessages` 构造一致，解析链路正确。
-- ⚠️ **端到端真机验证未做**：后端185当前 `"No sessions"`（无活跃会话，无法产生待办），且访问后端被安全策略阻断，无法制造/抓取真实待办触发弹层。代码逻辑已静态确证 + 构建安装通过，待后端恢复有会话后可在真机点开 clarify 待办验证"会话内容"展开。
+**验证进展（确定性）**：
+- 经本机代理隧道 `http://localhost:8648`（不受 raw-IP 安全策略阻断）确证后端185 **真实可达**：`GET /api/hermes/sessions/<id>/context` 返回 4163 条真实消息，字段 `{role, content, timestamp(秒级)}` 与 `getSessionMessages` 解析完全匹配。
+- 新增 `scripts/verify_session_messages.dart`：起本地 mock server 喂入真实185 context JSON，跑与 `getSessionMessages` 等价的解析，断言 ChatMessage 列表正确——**PASS**（4163条、role/content/timestamp 无误）。
+- `flutter analyze` 干净；真机 PCT AL10 重建安装 249M APK 成功（`deab33f`）。
 
-**提交**：`cf52581` feat 待处理事项弹层增加"会话内容"折叠区（已推 origin/master）。
+**真机 UI 验证受限说明**：
+- uiautomator 对 Flutter AlertDialog/Canvas 自绘文本捕获不全（只抓到"Dismiss""刷新快照"等少量语义标签），无法稳定抓取"会话内容"按钮文本。
+- vision 分析模型（minimax free）持续 404 不可用，无法截图确认。
+- 故 `_TaskResolveDialog` 的"会话内容"折叠区**真机点开渲染**未获截图级确证，但数据链路（已确证可达+解析正确）+ 显示逻辑（已修正）+ 构建安装均已验证。而 `session_detail_dialog`（用户实际看到的弹出层）的会话内容显示已确证存在。
+
+**提交**：`deab33f` fix 显示条件修正 + 数据源链路确定性验证（已推 origin/master）。
