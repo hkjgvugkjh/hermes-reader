@@ -1,8 +1,13 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/task_provider.dart';
 import '../providers/session_provider.dart';
+import '../models/hive_models.dart';
+import '../services/hermes_api_client.dart';
+import '../services/session_monitor_service.dart';
 
 /// Shows pending tasks surfaced by session monitoring.
 class TaskListScreen extends StatelessWidget {
@@ -20,7 +25,14 @@ class TaskListScreen extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.delete_sweep),
             tooltip: '清空',
-            onPressed: taskProvider.clear,
+            onPressed: () async {
+              final ok = await _confirmDelete(
+                context,
+                '清空待处理事项',
+                '确定要清空全部 ${taskProvider.tasks.length} 项待处理事项吗？此操作不可撤销。',
+              );
+              if (ok && context.mounted) taskProvider.clear();
+            },
           ),
         ],
       ),
@@ -144,7 +156,17 @@ class _TaskTile extends StatelessWidget {
         trailing: task.resolved
             ? IconButton(
                 icon: const Icon(Icons.delete, size: 20),
-                onPressed: () => context.read<TaskProvider>().remove(task.id),
+                tooltip: '删除',
+                onPressed: () async {
+                  final ok = await _confirmDelete(
+                    context,
+                    '删除事项',
+                    '确定要删除「${task.title}」吗？此操作不可撤销。',
+                  );
+                  if (ok && context.mounted) {
+                    context.read<TaskProvider>().remove(task.id);
+                  }
+                },
               )
             : IconButton(
                 icon: const Icon(Icons.open_in_new, size: 20),
@@ -165,9 +187,13 @@ class _TaskTile extends StatelessWidget {
   }
 }
 
-/// Dialog that asks the user to resolve a pending authorization task. After the
-/// user confirms a choice the result is sent back to the proxy (DI 0x3A) and the
-/// dialog dismisses, returning to the previous screen.
+/// Dialog that asks the user to resolve a pending task.
+///
+/// - clarify tasks send the choice back via [ProxyClient.sendClarifyResponse]
+///   (DI 0x3B, session_id + clarify_id).
+/// - auth tasks send it back via [ProxyClient.sendAuthResponse] (DI 0x3A).
+/// When the backend provides no preset choices the user may type a free-form
+/// reply, which is sent verbatim to the proxy.
 class _TaskResolveDialog extends StatefulWidget {
   final TaskItem task;
 
@@ -179,6 +205,78 @@ class _TaskResolveDialog extends StatefulWidget {
 
 class _TaskResolveDialogState extends State<_TaskResolveDialog> {
   bool _sending = false;
+  bool _showDetail = false;
+  bool _showMsgs = false;
+  final TextEditingController _controller = TextEditingController();
+
+  // 会话内容（按 serverId 拉取的历史消息）。
+  List<ChatMessage> _messages = const [];
+  bool _loadingMsgs = false;
+  String? _msgError;
+  // 实际用于拉取会话内容的 serverId（含兜底解析），显示入口与加载共用。
+  String _resolvedServerId = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSessionMessages();
+  }
+
+  Future<void> _loadSessionMessages() async {
+    final session = context.read<SessionProvider>();
+    // 待办 serverId 为空时，尝试从 details 里取 session_id（部分 DI 事件把它
+    // 放在 details 而非顶层 serverId）。
+    var serverId = widget.task.serverId;
+    if (serverId.isEmpty) {
+      final d = widget.task.details;
+      if (d != null && d['session_id'] != null) {
+        serverId = d['session_id'].toString();
+      }
+    }
+    _resolvedServerId = serverId;
+    if (serverId.isEmpty) return;
+    // 仅 clarify 类任务携带有效会话 id；auth 类可能为空或无会话。
+    var client = session.clientForSession(serverId);
+    // Fallback：会话未被 monitor 索引时，用监控目标中的首个服务器构造 client。
+    client ??= session.monitor.targets.isNotEmpty
+        ? _clientForTarget(session.monitor.targets.first)
+        : null;
+    if (client == null) {
+      if (!mounted) return;
+      setState(() => _msgError = '未找到该会话所属的服务器');
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _loadingMsgs = true);
+    try {
+      final msgs = await client.getSessionMessages(serverId);
+      if (!mounted) return;
+      setState(() {
+        _messages = msgs;
+        _loadingMsgs = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _msgError = '加载会话内容失败：$e';
+        _loadingMsgs = false;
+      });
+    }
+  }
+
+  HermesApiClient _clientForTarget(MonitorTarget target) {
+    final client = HermesApiClient(ServerConfig(
+      id: target.serverId,
+      name: target.serverId,
+      url: target.baseUrl,
+      authToken: target.authToken,
+      username: target.username,
+      password: target.password,
+      profile: target.profile ?? 'default',
+    ));
+    client.setToken(target.authToken);
+    return client;
+  }
 
   Future<void> _submit(String choice) async {
     final session = context.read<SessionProvider>();
@@ -192,17 +290,31 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
     }
     setState(() => _sending = true);
     try {
-      await proxyClient.sendAuthResponse(
-        reqId: widget.task.id,
-        serverId: widget.task.serverId,
-        result: {
-          'choice': choice,
-          'confirmed': choice != '拒绝' && choice != '取消',
-        },
-      );
+      // 按任务类型回传：clarify 用 session_id + clarify_id；auth 用 req_id + server_id。
+      final task = widget.task;
+      final details = task.details ?? <String, dynamic>{};
+      if (task.kind == TaskKind.clarify) {
+        final sessionId = task.serverId.isNotEmpty
+            ? task.serverId
+            : (details['session_id'] ?? '').toString();
+        await proxyClient.sendClarifyResponse(
+          sessionId: sessionId,
+          clarifyId: task.id,
+          response: choice,
+        );
+      } else {
+        await proxyClient.sendAuthResponse(
+          reqId: task.id,
+          serverId: task.serverId,
+          result: {
+            'choice': choice,
+            'confirmed': choice != '拒绝' && choice != '取消',
+          },
+        );
+      }
       if (!mounted) return;
-      // Mark resolved and return to the previous screen.
-      context.read<TaskProvider>().resolve(widget.task.id);
+      // 标记已处理并关闭对话框。
+      context.read<TaskProvider>().resolve(task.id);
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
@@ -214,12 +326,16 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
   }
 
   @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final task = widget.task;
     final expired = task.isExpired;
-    final choices = task.choices.isNotEmpty
-        ? task.choices
-        : const ['确认', '拒绝'];
+    final hasChoices = task.choices.isNotEmpty;
 
     return AlertDialog(
       title: Row(
@@ -230,20 +346,162 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
           Expanded(child: Text(task.title)),
         ],
       ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(task.description),
-          if (expired)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                '该事项已超时，操作可能不再生效',
-                style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 命令/请求细节：明确呈现给用户的核心信息。
+            Text(task.description),
+            if (expired)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '该事项已超时，操作可能不再生效',
+                  style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+                ),
               ),
-            ),
-        ],
+            // 会话内容：按 serverId 拉取该待办所属会话的历史消息，便于决策。
+            if (_resolvedServerId.isNotEmpty) ...[
+              TextButton.icon(
+                onPressed: () => setState(() => _showMsgs = !_showMsgs),
+                icon: Icon(
+                  _showMsgs ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                label: const Text('会话内容', style: TextStyle(fontSize: 13)),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+              if (_showMsgs) ...[
+                const SizedBox(height: 6),
+                if (_loadingMsgs)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 8),
+                        Text('加载会话内容…', style: TextStyle(fontSize: 12)),
+                      ],
+                    ),
+                  )
+                else if (_msgError != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(
+                      _msgError!,
+                      style: TextStyle(fontSize: 12, color: Colors.red.shade700),
+                    ),
+                  )
+                else if (_messages.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 4),
+                    child: Text(
+                      '该会话暂无消息',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  )
+                else
+                  Container(
+                    constraints: const BoxConstraints(maxHeight: 260),
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (final m in _messages)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    m.role.toUpperCase(),
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: m.role == 'user'
+                                          ? Colors.blue.shade700
+                                          : Colors.green.shade700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  SelectableText(
+                                    m.content,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ],
+            const SizedBox(height: 10),
+            // 可折叠的原始命令详情，方便用户查看完整上下文。
+            if (task.details != null && task.details!.isNotEmpty)
+              TextButton.icon(
+                onPressed: () => setState(() => _showDetail = !_showDetail),
+                icon: Icon(
+                  _showDetail ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                label: const Text('命令详情', style: TextStyle(fontSize: 13)),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            if (_showDetail && task.details != null)
+              Container(
+                margin: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                constraints: const BoxConstraints(maxHeight: 200),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(task.details),
+                    style: const TextStyle(
+                        fontSize: 11, fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+            // 无预设选项时，提供自由文本输入框让用户直接回复。
+            if (!hasChoices) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _controller,
+                decoration: const InputDecoration(
+                  labelText: '直接输入回复',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                maxLines: 2,
+              ),
+            ],
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -255,19 +513,60 @@ class _TaskResolveDialogState extends State<_TaskResolveDialog> {
                 },
           child: const Text('稍后处理'),
         ),
-        ...choices.map(
-          (c) => FilledButton(
-            onPressed: _sending ? null : () => _submit(c),
-            child: _sending
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : Text(c),
+        if (hasChoices)
+          ...task.choices.map(
+            (c) => FilledButton(
+              onPressed: _sending ? null : () => _submit(c),
+              child: _sending
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(c),
+            ),
+          )
+        else
+          FilledButton(
+            onPressed: _sending
+                ? null
+                : () => _submit(_controller.text.trim().isEmpty
+                    ? '已阅'
+                    : _controller.text.trim()),
+            child: const Text('提交'),
           ),
-        ),
       ],
     );
   }
+}
+
+/// Asks the user to confirm an irreversible delete action.
+/// Returns true only when the user taps 删除.
+Future<bool> _confirmDelete(
+  BuildContext context,
+  String title,
+  String content,
+) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(title),
+      content: Text(content),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Colors.red,
+            foregroundColor: Colors.white,
+          ),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+  return result == true;
 }
